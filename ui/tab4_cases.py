@@ -8,6 +8,8 @@ import streamlit as st
 import time
 import os
 import logging
+import numpy as np
+import faiss
 from pathlib import Path
 
 from config.constants import FACTORS
@@ -185,11 +187,10 @@ def _render_manual_add_form(case_type: str, embedder):
 
 def _get_template_path():
     """获取模板文件路径（兼容本地开发和 Streamlit Cloud）"""
-    # 优先使用项目根目录下的相对路径
     candidates = [
-        Path(__file__).parent.parent / "tea_backup" / "template.xlsx",  # 从 ui/ 目录向上
-        Path("tea_backup") / "template.xlsx",                           # 从项目根目录
-        Path(__file__).parent / "tea_backup" / "template.xlsx",         # 与当前文件同级
+        Path(__file__).parent.parent / "tea_backup" / "template.xlsx",
+        Path("tea_backup") / "template.xlsx",
+        Path(__file__).parent / "tea_backup" / "template.xlsx",
     ]
     for p in candidates:
         if p.exists():
@@ -209,7 +210,7 @@ def _render_batch_add_section(case_type: str):
         help="支持 Excel 格式"
     )
 
-    # 下载模板按钮 - 使用相对路径
+    # 下载模板按钮
     template_path = _get_template_path()
     if template_path:
         with open(template_path, 'rb') as f:
@@ -234,7 +235,10 @@ def _render_batch_add_section(case_type: str):
 
 
 def _save_case(text, scores, master_comment, case_type, embedder):
-    """保存判例 - 升级版"""
+    """保存判例 - 升级版（进阶判例包含 embedding）"""
+    from config.settings import PATHS
+    from core.resource_manager import ResourceManager
+
     if not text or not scores:
         st.warning("⚠️ 请填写完整的判例信息")
         return
@@ -247,15 +251,81 @@ def _save_case(text, scores, master_comment, case_type, embedder):
     }
 
     if case_type == "basic":
+        # ===== 基础判例：只需要保存到 JSON =====
         st.session_state.basic_cases.append(new_c)
+        ResourceManager.save_json(st.session_state.basic_cases, PATHS.basic_case_data)
         st.success("✅ 已保存基础判例！")
         st.balloons()
     else:
+        # ===== 进阶判例：需要做 embedding 并添加到 FAISS 索引 =====
         supp_idx, supp_data = st.session_state.supp_cases
-        supp_data.append(new_c)
-        st.session_state.supp_cases = (supp_idx, supp_data)
-        st.success("✅ 已保存进阶判例！")
-        st.balloons()
+
+        try:
+            # 1. 编码文本为嵌入向量
+            embedding = embedder.encode([text])
+            if not isinstance(embedding, np.ndarray):
+                embedding = np.array(embedding, dtype=np.float32)
+            if len(embedding.shape) == 1:
+                embedding = embedding.reshape(1, -1)
+
+            # 2. 检查维度是否匹配
+            if supp_idx.ntotal > 0 and embedding.shape[1] != supp_idx.d:
+                # 维度不匹配，需要重建索引
+                st.warning(f"⚠️ 向量维度不匹配（索引: {supp_idx.d}, 当前: {embedding.shape[1]}），正在重建索引...")
+
+                all_texts = [item["text"] for item in supp_data] + [text]
+                all_embeddings = embedder.encode(all_texts)
+                if not isinstance(all_embeddings, np.ndarray):
+                    all_embeddings = np.array(all_embeddings, dtype=np.float32)
+
+                new_idx = faiss.IndexFlatL2(all_embeddings.shape[1])
+                new_idx.add(all_embeddings.astype('float32'))
+
+                supp_data.append(new_c)
+                st.session_state.supp_cases = (new_idx, supp_data)
+
+                ResourceManager.save(
+                    new_idx, supp_data,
+                    PATHS.supp_case_index, PATHS.supp_case_data,
+                    is_json=True
+                )
+            else:
+                # 维度匹配或索引为空
+                if supp_idx.ntotal == 0:
+                    # 空索引，创建新的
+                    new_idx = faiss.IndexFlatL2(embedding.shape[1])
+                    new_idx.add(embedding.astype('float32'))
+                    supp_data.append(new_c)
+                    st.session_state.supp_cases = (new_idx, supp_data)
+
+                    ResourceManager.save(
+                        new_idx, supp_data,
+                        PATHS.supp_case_index, PATHS.supp_case_data,
+                        is_json=True
+                    )
+                else:
+                    # 正常追加
+                    supp_idx.add(embedding.astype('float32'))
+                    supp_data.append(new_c)
+                    st.session_state.supp_cases = (supp_idx, supp_data)
+
+                    ResourceManager.save(
+                        supp_idx, supp_data,
+                        PATHS.supp_case_index, PATHS.supp_case_data,
+                        is_json=True
+                    )
+
+            st.success("✅ 已保存进阶判例！")
+            st.balloons()
+
+        except Exception as e:
+            # 即使 embedding 失败，也要保存数据（下次启动时可重建索引）
+            logger.error(f"进阶判例 embedding 失败: {e}")
+            supp_data.append(new_c)
+            st.session_state.supp_cases = (supp_idx, supp_data)
+            ResourceManager.save_json(supp_data, PATHS.supp_case_data)
+            st.warning(f"⚠️ 判例已保存但向量索引更新失败: {e}")
+            st.info("💡 下次启动应用时会自动重建索引")
 
     time.sleep(0.3)
     st.rerun()
