@@ -1,792 +1,515 @@
 """
-dialogs.py
-===========
-各种弹窗 UI 组件 - 升级版
+tab1_interactive.py
+====================
+交互评分 Tab - 升级版
 """
 
 import streamlit as st
-import time
-import numpy as np
-import faiss
-from config.constants import TEA_EXAMPLES, FACTORS
-from config.settings import PATHS
-from core.resource_manager import ResourceManager
 
-# bge-base-zh-v1.5 输出维度
-DEFAULT_EMBEDDING_DIM = 768
+from config.constants import FACTORS
+from config.settings import get_factor_color, get_score_color, FACTOR_COLORS
+from utils.visualization import plot_flavor_shape
 
 
-# ==========================================
-# 提示词查看弹窗
-# ==========================================
-
-@st.dialog("📝 本次发送给 LLM 的完整 Prompt", width="large")
-def show_prompt_dialog():
-    """弹窗展示发送给 LLM 的系统提示词和用户提示词"""
-    st.markdown("""
-    <div style="padding: 12px; background: linear-gradient(135deg, #F5F9F5 0%, #EDF5EB 100%); border-radius: 8px; margin-bottom: 20px; border-left: 4px solid #4A5D53;">
-        <span style="color: #4A5D53; font-size: 1.1em; font-weight: 600;">🔍 提示词详情</span>
-    </div>
-    """, unsafe_allow_html=True)
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.markdown("**🔧 System Prompt（系统提示词）：**")
-        system_prompt = st.session_state.get('last_llm_sys_prompt', '（暂无）')
-        st.code(system_prompt, language=None, height=400)
-
-    with col2:
-        st.markdown("**💬 User Prompt（用户提示词）：**")
-        user_prompt = st.session_state.get('last_llm_user_prompt', '（暂无）')
-        st.code(user_prompt, language=None, height=400)
+# 因子对应的 CSS 类名映射
+FACTOR_CARD_CLASS = {
+    "优雅性": "factor-card-grace",
+    "辨识度": "factor-card-distinct",
+    "协调性": "factor-card-harmony",
+    "饱和度": "factor-card-saturation",
+    "持久性": "factor-card-endurance",
+    "苦涩度": "factor-card-bitterness",
+}
 
 
+def render_tab1(embedder, client, client_d, model_id):
+    """渲染交互评分 Tab"""
+    with st.container():
+        st.info("💡 将参考知识库与判例库进行评分。确认结果可更新判例库。")
 
+        # 参数设置区域
+        c1, c2, c3, c4, c5 = st.columns([1, 3, 1, 3, 1])
+        r_num = c2.number_input("参考知识库条目数量", 1, 20, 3, key="r1")
+        c_num = c4.number_input("参考进阶判例条目数量", 1, 20, 5, key="c1")
 
-# ==========================================
-# 茶评示例弹窗
-# ==========================================
+        # 用户输入区域
+        if 'current_user_input' not in st.session_state:
+            st.session_state.current_user_input = ""
 
-@st.dialog("🍵 茶评示例", width="large")
-def show_tea_examples_dialog():
-    """展示预置茶评示例文本"""
-
-    st.info("📜 品鉴案例精选")
-    st.caption("💡 以下是五组茶评示例，点击文本框即可选中复制，粘贴到「交互评分」中使用")
-
-    examples = st.session_state.get('tea_examples', TEA_EXAMPLES)
-
-    st.divider()
-
-    for i, ex in enumerate(examples):
-        st.markdown(f"**{ex['title']}**")
-        st.code(ex["text"], language=None)
-        if i < len(examples) - 1:
-            st.markdown("")
-
-
-# ==========================================
-# 基础判例弹窗
-# ==========================================
-
-@st.dialog("📋 基础判例列表", width="large")
-def show_basic_cases_dialog(embedder):
-    """展示当前基础判例列表 - 升级版（支持勾选转移到进阶判例）"""
-    cases = st.session_state.basic_cases
-
-    if not cases:
-        st.markdown("""
-        <div class="empty-state">
-            <div class="empty-state-icon">📋</div>
-            <div class="empty-state-text">暂无基础判例</div>
-        </div>
-        """, unsafe_allow_html=True)
-        return
-
-    # 初始化勾选状态存储
-    if 'basic_case_checkboxes' not in st.session_state:
-        st.session_state.basic_case_checkboxes = {}
-
-    st.markdown(f"**📊 共 {len(cases)} 条基础判例**")
-    st.markdown("---")
-
-    for idx, case in enumerate(cases):
-        with st.container():
-            col1, col2 = st.columns([0.05, 0.95])
-            with col1:
-                current_value = st.session_state.basic_case_checkboxes.get(idx, False)
-                checked = st.checkbox("", key=f"basic_check_{idx}",
-                                     value=current_value,
-                                     label_visibility="collapsed")
-                st.session_state.basic_case_checkboxes[idx] = checked
-            with col2:
-                with st.expander(f"📋 判例 {idx + 1}", expanded=False):
-                    st.markdown("**📝 判例描述：**")
-                    st.markdown(f"> {case.get('text', '')}")
-
-                    st.markdown("---")
-                    st.markdown("**🏷️ 因子评分详情：**")
-
-                    scores = case.get('scores', {})
-                    fc1, fc2 = st.columns(2)
-
-                    for i, (factor, data) in enumerate(scores.items()):
-                        with (fc1 if i % 2 == 0 else fc2):
-                            with st.container(border=True):
-                                st.markdown(f"**{factor}**")
-                                score_val = data.get('score', '-')
-                                comment = data.get('comment', '暂无评语')
-                                suggestion = data.get('suggestion', '暂无建议')
-
-                                col_s, col_d = st.columns([1, 2])
-                                with col_s:
-                                    st.markdown(f"<span style='font-size:12px; color:#666;'>分数: </span><span style='font-size:14px; font-weight:bold; color:#2E7D32;'>{score_val}/9</span>", unsafe_allow_html=True)
-                                with col_d:
-                                    if comment and comment != '暂无评语':
-                                        st.caption(f"💬 {comment}")
-                                    if suggestion and suggestion != '暂无建议':
-                                        st.caption(f"💡 {suggestion}")
-
-                    st.markdown("---")
-                    st.markdown("**🍵 宗师总评：**")
-                    st.info(case.get('master_comment', '暂无'))
-
-                    st.markdown("---")
-                    if st.button("✏️ 编辑此判例", key=f"edit_basic_{idx}", width='stretch'):
-                        st.session_state.editing_basic_idx = idx
-                        st.rerun()
-
-    st.markdown("---")
-
-    selected_count = sum(1 for v in st.session_state.basic_case_checkboxes.values() if v)
-    st.markdown(f"已选择: **{selected_count}** 条")
-
-    col_transfer, col_close = st.columns([1, 1])
-
-    with col_transfer:
-        if st.button("➡️ 转移到进阶判例", type="primary",
-                     disabled=selected_count == 0,
-                     width='stretch'):
-            _transfer_basic_to_supp(embedder)
-
-    with col_close:
-        if st.button("✅ 关闭", type="secondary", width='stretch'):
-            st.rerun()
-
-
-def _transfer_basic_to_supp(embedder):
-    """将选中的基础判例转移到进阶判例（增量 embedding）"""
-    selected_indices = [idx for idx, checked in
-                       st.session_state.basic_case_checkboxes.items()
-                       if checked]
-
-    if not selected_indices:
-        return
-
-    # 1. 收集选中的判例并从基础判例中删除
-    selected_cases = []
-    for idx in reversed(sorted(selected_indices)):
-        if idx < len(st.session_state.basic_cases):
-            case = st.session_state.basic_cases.pop(idx)
-            selected_cases.append(case)
-
-    # 2. 保存更新后的基础判例
-    ResourceManager.save_json(st.session_state.basic_cases, PATHS.basic_case_data)
-
-    # 3. 为每个新判例生成向量并添加到进阶判例
-    supp_idx, supp_data = st.session_state.supp_cases
-
-    for case in selected_cases:
-        text = case.get("text", "")
-        supp_data.append(case)
-
-        if text and embedder:
-            try:
-                embedding = embedder.encode([text])
-                if not isinstance(embedding, np.ndarray):
-                    embedding = np.array(embedding, dtype=np.float32)
-                if len(embedding.shape) == 1:
-                    embedding = embedding.reshape(1, -1)
-
-                # 检查维度
-                if supp_idx.ntotal > 0 and embedding.shape[1] != supp_idx.d:
-                    # 维度不匹配，标记需要重建（稍后统一处理）
-                    continue
-
-                if supp_idx.ntotal == 0 and supp_idx.d != embedding.shape[1]:
-                    # 空索引但维度不对，重建
-                    supp_idx = faiss.IndexFlatL2(embedding.shape[1])
-
-                supp_idx.add(embedding.astype('float32'))
-            except Exception as e:
-                print(f"生成向量失败: {e}")
-
-    # 4. 如果向量数量和数据数量不匹配，全量重建
-    if supp_idx.ntotal != len(supp_data) and embedder:
-        try:
-            all_texts = [item.get("text", "") for item in supp_data]
-            all_embeddings = embedder.encode(all_texts)
-            if not isinstance(all_embeddings, np.ndarray):
-                all_embeddings = np.array(all_embeddings, dtype=np.float32)
-
-            new_idx = faiss.IndexFlatL2(all_embeddings.shape[1])
-            new_idx.add(all_embeddings.astype('float32'))
-            supp_idx = new_idx
-        except Exception as e:
-            print(f"全量重建索引失败: {e}")
-
-    # 5. 保存进阶判例
-    ResourceManager.save(supp_idx, supp_data,
-                        PATHS.supp_case_index,
-                        PATHS.supp_case_data,
-                        is_json=True)
-
-    st.session_state.supp_cases = (supp_idx, supp_data)
-
-    # 6. 清空勾选状态
-    st.session_state.basic_case_checkboxes = {}
-
-    st.success(f"✅ 已成功转移 {len(selected_cases)} 条到进阶判例！")
-    time.sleep(0.5)
-    st.rerun()
-
-
-@st.dialog("✏️ 编辑基础判例", width="large")
-def edit_basic_case_dialog(idx: int):
-    """编辑指定基础判例 - 完整表单编辑"""
-    cases = st.session_state.basic_cases
-
-    if idx >= len(cases):
-        st.error("❌ 判例索引无效")
-        return
-
-    case = cases[idx]
-
-    st.markdown(f"""
-    <div style="padding: 12px; background: #F5F9F5; border-radius: 8px; margin-bottom: 20px;">
-        <span style="color: #4A5D53; font-weight: 600;">📝 编辑判例 #{idx + 1}</span>
-    </div>
-    """, unsafe_allow_html=True)
-
-    with st.form(f"edit_basic_form_{idx}"):
-        f_txt = st.text_area(
-            "📝 判例描述",
-            case.get('text', ''),
-            height=80,
-            key=f"edit_basic_txt_{idx}"
+        user_input = st.text_area(
+            "请输入茶评描述",
+            value=st.session_state.current_user_input,
+            height=120,
+            key="ui",
         )
+        st.session_state.current_user_input = user_input
 
-        st.markdown("##### 🏷️ 因子评分详情")
+        # Session state 初始化
+        if 'last_scores' not in st.session_state:
+            st.session_state.last_scores = None
+            st.session_state.last_master_comment = ""
+        if 'last_llm_sys_prompt' not in st.session_state:
+            st.session_state.last_llm_sys_prompt = ""
+        if 'last_llm_user_prompt' not in st.session_state:
+            st.session_state.last_llm_user_prompt = ""
+        if 'score_version' not in st.session_state:
+            st.session_state.score_version = 0
 
-        fc1, fc2 = st.columns(2)
-        input_scores = {}
-        current_scores = case.get('scores', {})
-
-        for i, f in enumerate(FACTORS):
-            data = current_scores.get(f, {})
-            with (fc1 if i % 2 == 0 else fc2):
-                st.markdown(f"**{f}**")
-
-                col_score, col_comment = st.columns([1, 2])
-
-                with col_score:
-                    val = st.number_input(
-                        "分数",
-                        0, 9, data.get('score', 7),
-                        key=f"edit_basic_s_{idx}_{i}",
-                        label_visibility="collapsed"
-                    )
-
-                with col_comment:
-                    cmt = st.text_input(
-                        "评语",
-                        data.get('comment', ''),
-                        key=f"edit_basic_c_{idx}_{i}",
-                        label_visibility="collapsed"
-                    )
-
-                sug = st.text_input(
-                    "建议",
-                    data.get('suggestion', ''),
-                    key=f"edit_basic_a_{idx}_{i}",
-                    placeholder="改进建议..."
-                )
-
-                input_scores[f] = {
-                    "score": val,
-                    "comment": cmt,
-                    "suggestion": sug
-                }
-
-        f_master = st.text_area(
-            "🍵 宗师总评",
-            case.get('master_comment', ''),
-            height=60,
-            key=f"edit_basic_master_{idx}"
-        )
-
-        st.markdown("---")
-
-        col1, col2 = st.columns([1, 1])
-
-        with col1:
-            if st.form_submit_button("💾 保存修改", type="primary", width='stretch'):
-                cases[idx] = {
-                    "text": f_txt,
-                    "scores": input_scores,
-                    "master_comment": f_master,
-                    "created_at": case.get('created_at', time.strftime("%Y-%m-%d %H:%M:%S"))
-                }
-                st.session_state.basic_cases = cases
-                # 保存到文件
-                ResourceManager.save_json(cases, PATHS.basic_case_data)
-                st.session_state.editing_basic_idx = None
-                st.success("✅ 已保存修改！")
-                time.sleep(0.5)
-                st.rerun()
-
-        with col2:
-            if st.form_submit_button("❌ 取消", width='stretch'):
-                st.session_state.editing_basic_idx = None
-                st.rerun()
-
-
-# ==========================================
-# 进阶判例弹窗
-# ==========================================
-
-@st.dialog("📋 进阶判例列表", width="large")
-def show_supp_cases_dialog(embedder):
-    """展示当前进阶判例列表 - 升级版（支持勾选转移到基础判例）"""
-    _, cases = st.session_state.supp_cases
-
-    if not cases:
+        # 评分按钮 - 与输入框宽度一致
+        # 自定义按钮颜色
         st.markdown("""
-        <div class="empty-state">
-            <div class="empty-state-icon">📋</div>
-            <div class="empty-state-text">暂无进阶判例</div>
-        </div>
+        <style>
+        button[kind="primary"] {
+            background-color: #4A5D53 !important;
+            color: white !important;
+        }
+        button[kind="primary"]:hover {
+            background-color: #4A5D53DD !important;
+        }
+        </style>
         """, unsafe_allow_html=True)
-        return
 
-    if 'supp_case_checkboxes' not in st.session_state:
-        st.session_state.supp_case_checkboxes = {}
-
-    st.markdown(f"**📊 共 {len(cases)} 条进阶判例**")
-    st.markdown("---")
-
-    for idx, case in enumerate(cases):
-        with st.container():
-            col1, col2 = st.columns([0.05, 0.95])
-            with col1:
-                current_value = st.session_state.supp_case_checkboxes.get(idx, False)
-                checked = st.checkbox("", key=f"supp_check_{idx}",
-                                     value=current_value,
-                                     label_visibility="collapsed")
-                st.session_state.supp_case_checkboxes[idx] = checked
-            with col2:
-                with st.expander(f"📋 判例 {idx + 1}", expanded=False):
-                    st.markdown("**📝 判例描述：**")
-                    st.markdown(f"> {case.get('text', '')}")
-
-                    st.markdown("---")
-                    st.markdown("**🏷️ 因子评分详情：**")
-
-                    scores = case.get('scores', {})
-                    fc1, fc2 = st.columns(2)
-
-                    for i, (factor, data) in enumerate(scores.items()):
-                        with (fc1 if i % 2 == 0 else fc2):
-                            with st.container(border=True):
-                                st.markdown(f"**{factor}**")
-                                score_val = data.get('score', '-')
-                                comment = data.get('comment', '暂无评语')
-                                suggestion = data.get('suggestion', '暂无建议')
-
-                                col_s, col_d = st.columns([1, 2])
-                                with col_s:
-                                    st.markdown(f"<span style='font-size:12px; color:#666;'>分数: </span><span style='font-size:14px; font-weight:bold; color:#2E7D32;'>{score_val}/9</span>", unsafe_allow_html=True)
-                                with col_d:
-                                    if comment and comment != '暂无评语':
-                                        st.caption(f"💬 {comment}")
-                                    if suggestion and suggestion != '暂无建议':
-                                        st.caption(f"💡 {suggestion}")
-
-                    st.markdown("---")
-                    st.markdown("**🍵 宗师总评：**")
-                    st.info(case.get('master_comment', '暂无'))
-
-                    st.markdown("---")
-                    if st.button("✏️ 编辑此判例", key=f"edit_supp_{idx}", width='stretch'):
-                        st.session_state.editing_supp_idx = idx
-                        st.rerun()
-
-    st.markdown("---")
-
-    selected_count = sum(1 for v in st.session_state.supp_case_checkboxes.values() if v)
-    st.markdown(f"已选择: **{selected_count}** 条")
-
-    col_transfer, col_close = st.columns([1, 1])
-
-    with col_transfer:
-        if st.button("⬅️ 转移到基础判例", type="primary",
-                     disabled=selected_count == 0,
-                     width='stretch'):
-            _transfer_supp_to_basic(embedder)
-
-    with col_close:
-        if st.button("✅ 关闭", type="secondary", width='stretch'):
-            st.rerun()
-
-
-def _transfer_supp_to_basic(embedder):
-    """将选中的进阶判例转移到基础判例（使用 faiss.reconstruct 避免重新 embedding）"""
-    selected_indices = [idx for idx, checked in
-                       st.session_state.supp_case_checkboxes.items()
-                       if checked]
-
-    if not selected_indices:
-        return
-
-    supp_idx, supp_data = st.session_state.supp_cases
-
-    # 1. 收集选中的判例
-    selected_cases = []
-    for idx in sorted(selected_indices):
-        if idx < len(supp_data):
-            selected_cases.append(supp_data[idx])
-
-    # 2. 计算要保留的索引
-    all_indices = set(range(len(supp_data)))
-    remove_indices = set(selected_indices)
-    keep_indices = sorted(all_indices - remove_indices)
-
-    # 3. 构建新的 supp_data（只保留未选中的）
-    new_supp_data = [supp_data[i] for i in keep_indices]
-
-    # 4. 重建 FAISS 索引（使用 reconstruct 避免重新 embedding）
-    if len(new_supp_data) > 0 and supp_idx.ntotal > 0:
-        try:
-            # 从现有索引中提取保留的向量
-            dim = supp_idx.d
-            keep_vectors = []
-            for i in keep_indices:
-                if i < supp_idx.ntotal:
-                    vec = supp_idx.reconstruct(i)
-                    keep_vectors.append(vec)
-
-            if keep_vectors:
-                keep_vectors_array = np.array(keep_vectors, dtype=np.float32)
-                new_idx = faiss.IndexFlatL2(dim)
-                new_idx.add(keep_vectors_array)
+        # 评分按钮 - 与输入框宽度一致
+        if st.button("开始评分", type="primary", width='stretch'):
+            if not user_input:
+                st.warning("⚠️ 请输入茶评描述")
             else:
-                new_idx = faiss.IndexFlatL2(dim)
-        except Exception as e:
-            print(f"从索引提取向量失败，尝试重新编码: {e}")
-            # 回退：重新编码
-            try:
-                all_texts = [item.get("text", "") for item in new_supp_data]
-                all_embeddings = embedder.encode(all_texts)
-                if not isinstance(all_embeddings, np.ndarray):
-                    all_embeddings = np.array(all_embeddings, dtype=np.float32)
-                new_idx = faiss.IndexFlatL2(all_embeddings.shape[1])
-                new_idx.add(all_embeddings.astype('float32'))
-            except Exception as e2:
-                print(f"重新编码也失败: {e2}")
-                new_idx = faiss.IndexFlatL2(DEFAULT_EMBEDDING_DIM)
-    else:
-        new_idx = faiss.IndexFlatL2(supp_idx.d if supp_idx and supp_idx.d > 0 else DEFAULT_EMBEDDING_DIM)
+                _handle_scoring(user_input, embedder, client, client_d, model_id, r_num, c_num)
 
-    # 5. 添加到基础判例并保存
-    for case in reversed(selected_cases):
-        st.session_state.basic_cases.append(case)
-    ResourceManager.save_json(st.session_state.basic_cases, PATHS.basic_case_data)
+        # 查看提示词按钮 - 在评分按钮下方
+        if st.session_state.get('last_llm_sys_prompt') or st.session_state.get('last_llm_user_prompt'):
+            if st.button("🔍 查看本次提示词", key="view_prompt_tab1",
+                        type="secondary", width='stretch'):
+                _show_prompt_dialog()
 
-    # 6. 保存进阶判例
+        # 评分结果展示
+        if st.session_state.last_scores:
+            st.markdown("---")
+            _render_scoring_results(user_input, embedder)
+
+
+def _handle_scoring(user_input, embedder, client, client_d, model_id, r_num, c_num):
+    """Handle scoring logic - Single line dynamic status display"""
+    import time
+    import threading
+
+    # Import core scoring logic
+    from core.ai_services import llm_normalize_user_input
+    from core.scoring import run_scoring
+
+    # Create status placeholder (single line, no collapse)
+    status_placeholder = st.empty()
+
+    # Stage 1: Preprocessing
+    status_placeholder.info(f"🍵 正在使用 {model_id} 品鉴... 📝 正在预处理茶评内容...")
+
     try:
-        ResourceManager.save(new_idx, new_supp_data,
-                            PATHS.supp_case_index,
-                            PATHS.supp_case_data,
-                            is_json=True)
-        st.session_state.supp_cases = (new_idx, new_supp_data)
+        user_input_clean = llm_normalize_user_input(user_input, client_d)
     except Exception as e:
-        st.error(f"⚠️ 进阶判例索引保存失败: {e}")
-        st.warning("基础判例已保存，但进阶判例可能未更新。请刷新后检查。")
-
-    # 7. 清空勾选状态
-    st.session_state.supp_case_checkboxes = {}
-
-    st.success(f"✅ 已成功转移 {len(selected_cases)} 条到基础判例！")
-    time.sleep(0.5)
-    st.rerun()
-
-
-@st.dialog("✏️ 编辑进阶判例", width="large")
-def edit_supp_case_dialog(idx: int, embedder):
-    """编辑指定进阶判例 - 完整表单编辑（文本变更时更新 embedding）"""
-    _, cases = st.session_state.supp_cases
-
-    if idx >= len(cases):
-        st.error("❌ 判例索引无效")
+        status_placeholder.error(f"❌ 预处理失败: {str(e)}")
         return
 
-    case = cases[idx]
-    original_text = case.get('text', '')
+    # Stage 2: Load knowledge base
+    status_placeholder.info(f"🍵 正在使用 {model_id} 品鉴... 🔍 正在加载知识库与判例...")
 
-    st.markdown(f"""
-    <div style="padding: 12px; background: #F5F9F5; border-radius: 8px; margin-bottom: 20px;">
-        <span style="color: #4A5D53; font-weight: 600;">📝 编辑判例 #{idx + 1}</span>
-    </div>
-    """, unsafe_allow_html=True)
+    try:
+        kb = st.session_state.kb
+        basic_cases = st.session_state.basic_cases
+        supp_cases = st.session_state.supp_cases
+        prompt_config = st.session_state.prompt_config
+    except Exception as e:
+        status_placeholder.error(f"❌ 加载知识库失败: {str(e)}")
+        return
 
-    with st.form(f"edit_supp_form_{idx}"):
-        f_txt = st.text_area(
-            "📝 判例描述",
-            case.get('text', ''),
-            height=80,
-            key=f"edit_supp_txt_{idx}"
-        )
+    # Stage 3: AI thinking with timeout and progress tracking
+    result = {'data': None, 'error': None, 'stage': 'thinking'}
 
-        st.markdown("##### 🏷️ 因子评分详情")
+    def run_scoring_thread():
+        """Run scoring in background, pass progress via result dict"""
+        try:
+            scores, kb_h, case_h, sent_sys_p, sent_user_p = run_scoring(
+                user_input=user_input_clean,
+                kb=kb,
+                basic_cases=basic_cases,
+                supp_cases=supp_cases,
+                prompt_config=prompt_config,
+                embedder=embedder,
+                client=client,
+                model_id=model_id,
+                r_num=r_num,
+                c_num=c_num
+            )
+            result['data'] = (scores, kb_h, case_h, sent_sys_p, sent_user_p)
+        except Exception as e:
+            result['error'] = e
 
-        fc1, fc2 = st.columns(2)
-        input_scores = {}
-        current_scores = case.get('scores', {})
+    # Start scoring thread
+    thread = threading.Thread(target=run_scoring_thread, daemon=True)
+    start_time = time.time()
+    thread.start()
 
-        for i, f in enumerate(FACTORS):
-            data = current_scores.get(f, {})
-            with (fc1 if i % 2 == 0 else fc2):
-                st.markdown(f"**{f}**")
+    # Track thinking stages (time-based, progressive, no loop)
+    thinking_stages = [
+        (5, "🎯 正在分析香气优雅性与辨识度..."),    
+        (10, "👅 正在评估滋味协调性与饱和度..."),     
+        (15, "⏳ 正在感受余韵持久性与苦涩度..."), 
+        (20, "🤔 正在综合各项因子给出评分..."),      
+        (25, "✨ 正在生成宗师总评..."),             
+        (999, "🤖 AI 正在深度思考评分...")           
+    ]
 
-                col_score, col_comment = st.columns([1, 2])
+    current_stage_idx = 0
+    timeout = 60  # 60s timeout
 
-                with col_score:
-                    val = st.number_input(
-                        "分数",
-                        0, 9, data.get('score', 7),
-                        key=f"edit_supp_s_{idx}_{i}",
-                        label_visibility="collapsed"
-                    )
+    # Dynamic status update (based on actual progress)
+    while thread.is_alive():
+        elapsed = time.time() - start_time
 
-                with col_comment:
-                    cmt = st.text_input(
-                        "评语",
-                        data.get('comment', ''),
-                        key=f"edit_supp_c_{idx}_{i}",
-                        label_visibility="collapsed"
-                    )
+        # Check timeout
+        if elapsed > timeout:
+            status_placeholder.error(f"⏰ 评分超时（{timeout}秒）- 请稍后重试")
+            st.error("""
+            AI 思考时间过长，可能原因：
+            1. 输入内容过长
+            2. 服务器负载较高
+            3. 网络连接不稳定
 
-                sug = st.text_input(
-                    "建议",
-                    data.get('suggestion', ''),
-                    key=f"edit_supp_a_{idx}_{i}",
-                    placeholder="改进建议..."
-                )
-
-                input_scores[f] = {
-                    "score": val,
-                    "comment": cmt,
-                    "suggestion": sug
-                }
-
-        f_master = st.text_area(
-            "🍵 宗师总评",
-            case.get('master_comment', ''),
-            height=60,
-            key=f"edit_supp_master_{idx}"
-        )
-
-        st.markdown("---")
-
-        col1, col2 = st.columns([1, 1])
-
-        with col1:
-            if st.form_submit_button("💾 保存修改", type="primary", width='stretch'):
-                # 更新判例数据
-                cases[idx] = {
-                    "text": f_txt,
-                    "scores": input_scores,
-                    "master_comment": f_master,
-                    "created_at": case.get('created_at', time.strftime("%Y-%m-%d %H:%M:%S"))
-                }
-
-                supp_idx = st.session_state.supp_cases[0]
-
-                # ===== 如果文本发生变化，需要更新对应的 embedding =====
-                if f_txt != original_text and embedder:
-                    try:
-                        # 重新编码新文本
-                        new_embedding = embedder.encode([f_txt])
-                        if not isinstance(new_embedding, np.ndarray):
-                            new_embedding = np.array(new_embedding, dtype=np.float32)
-                        if len(new_embedding.shape) == 1:
-                            new_embedding = new_embedding.reshape(1, -1)
-
-                        # FAISS IndexFlatL2 不支持原地更新，需要重建
-                        # 提取所有现有向量，替换修改的那个
-                        dim = supp_idx.d
-                        total = supp_idx.ntotal
-                        if total > 0 and new_embedding.shape[1] == dim:
-                            all_vectors = np.zeros((total, dim), dtype=np.float32)
-                            for i in range(total):
-                                all_vectors[i] = supp_idx.reconstruct(i)
-
-                            # 替换修改位置的向量
-                            if idx < total:
-                                all_vectors[idx] = new_embedding[0]
-
-                            new_idx = faiss.IndexFlatL2(dim)
-                            new_idx.add(all_vectors)
-                            supp_idx = new_idx
-                        else:
-                            # 维度不匹配或索引为空，全量重建
-                            all_texts = [item.get("text", "") for item in cases]
-                            all_embeddings = embedder.encode(all_texts)
-                            if not isinstance(all_embeddings, np.ndarray):
-                                all_embeddings = np.array(all_embeddings, dtype=np.float32)
-                            new_idx = faiss.IndexFlatL2(all_embeddings.shape[1])
-                            new_idx.add(all_embeddings.astype('float32'))
-                            supp_idx = new_idx
-
-                    except Exception as e:
-                        st.warning(f"⚠️ 向量更新失败: {e}，索引可能需要手动重建")
-
-                # 保存到 session_state 和文件
-                st.session_state.supp_cases = (supp_idx, cases)
-                ResourceManager.save(supp_idx, cases,
-                                    PATHS.supp_case_index,
-                                    PATHS.supp_case_data,
-                                    is_json=True)
-
-                st.session_state.editing_supp_idx = None
-                st.success("✅ 已保存修改！")
-                time.sleep(0.5)
-                st.rerun()
-
-        with col2:
-            if st.form_submit_button("❌ 取消", width='stretch'):
-                st.session_state.editing_supp_idx = None
-                st.rerun()
-
-
-# ==========================================
-# 茶评示例管理弹窗
-# ==========================================
-
-@st.dialog("⚙️ 茶评示例管理", width="large")
-def manage_tea_examples_dialog():
-    """管理茶评示例列表"""
-    st.markdown("""
-    <div style="padding: 12px; background: linear-gradient(135deg, #F5F9F5 0%, #EDF5EB 100%); border-radius: 8px; margin-bottom: 20px; border-left: 4px solid #4A5D53;">
-        <span style="color: #4A5D53; font-size: 1.1em; font-weight: 600;">📚 茶评示例管理</span>
-    </div>
-    """, unsafe_allow_html=True)
-
-    examples = st.session_state.get('tea_examples', TEA_EXAMPLES[:])
-
-    st.markdown(f"**📊 共 {len(examples)} 个示例**")
-    st.markdown("---")
-
-    for idx, ex in enumerate(examples):
-        with st.container(border=True):
-            col1, col2, col3 = st.columns([5, 1, 1])
-
-            with col1:
-                st.markdown(f"**{ex['title']}**")
-                st.caption(ex.get('text', '')[:80] + "...")
-
-            with col2:
-                if st.button("✏️", key=f"edit_tea_{idx}", width='stretch', help="编辑"):
-                    st.session_state.editing_tea_example_idx = idx
-                    st.rerun()
-
-            with col3:
-                if st.button("🗑️", key=f"del_tea_{idx}", width='stretch', help="删除"):
-                    examples.pop(idx)
-                    ResourceManager.save_tea_examples(examples)
-                    st.session_state.tea_examples = examples
-                    st.success(f"✅ 已删除示例")
-                    st.rerun()
-
-    st.markdown("---")
-
-    col1, col2, col3, col4 = st.columns(4)
-
-    with col1:
-        if st.button("➕ 新增示例", type="primary", width='stretch'):
-            st.session_state.editing_tea_example_idx = -1
-            st.rerun()
-
-    with col2:
-        if st.button("🔄 恢复默认", width='stretch'):
-            ResourceManager.save_tea_examples(TEA_EXAMPLES)
-            st.session_state.tea_examples = TEA_EXAMPLES[:]
-            st.success("✅ 已恢复为默认示例")
-            st.rerun()
-
-    with col4:
-        if st.button("✅ 关闭", type="secondary", width='stretch'):
-            st.rerun()
-
-
-@st.dialog("✏️ 编辑茶评示例", width="large")
-def edit_tea_example_dialog(idx: int):
-    """编辑指定茶评示例"""
-    examples = st.session_state.get('tea_examples', TEA_EXAMPLES[:])
-
-    if idx == -1:
-        st.markdown("""
-        <div style="padding: 12px; background: #EDF5EB; border-radius: 8px; margin-bottom: 20px;">
-            <span style="color: #4A5D53; font-weight: 600;">➕ 新增茶评示例</span>
-        </div>
-        """, unsafe_allow_html=True)
-        current_title = ""
-        current_text = ""
-    else:
-        if idx >= len(examples):
-            st.error("❌ 示例索引无效")
+            💡 建议：稍后重试或简化输入内容
+            """)
             return
 
-        st.markdown(f"""
-        <div style="padding: 12px; background: #EDF5EB; border-radius: 8px; margin-bottom: 20px;">
-            <span style="color: #4A5D53; font-weight: 600;">✏️ 编辑茶评示例 #{idx + 1}</span>
-        </div>
-        """, unsafe_allow_html=True)
-        current_title = examples[idx]['title']
-        current_text = examples[idx]['text']
+        # Determine current stage based on elapsed time
+        for i, (threshold, message) in enumerate(thinking_stages):
+            if elapsed < threshold:
+                current_stage_idx = i
+                break
 
-    new_title = st.text_input(
-        "标题",
-        current_title,
-        key=f"tea_title_{idx}",
-        placeholder="例如：🌸 桂花乌龙",
-        max_chars=50
-    )
-    new_text = st.text_area(
-        "内容",
-        current_text,
-        height=200,
-        key=f"tea_text_{idx}",
-        placeholder="请输入茶评描述...",
-        max_chars=2000
+        # Display current stage (no loop, progressive)
+        status_placeholder.info(
+            f"🍵 正在使用 {model_id} 品鉴... {thinking_stages[current_stage_idx][1]}"
+        )
+
+        # Wait before checking again
+        thread.join(timeout=0.8)
+
+    # Scoring completed or error
+    if result['error']:
+        status_placeholder.error(f"❌ 评分失败: {str(result['error'])}")
+        st.error(f"错误详情: {str(result['error'])}")
+        return
+
+    if result['data'] is None:
+        status_placeholder.error("❌ 评分失败，请检查配置")
+        return
+
+    scores, kb_h, case_h, sent_sys_p, sent_user_p = result['data']
+
+    # 关键检查：scores 为 None 说明 LLM/Embedding 调用失败
+    if scores is None:
+        status_placeholder.error("❌ 评分失败：模型未返回有效结果，请检查 Embedding 和 LLM 服务连接")
+        st.session_state.last_llm_sys_prompt = sent_sys_p
+        st.session_state.last_llm_user_prompt = sent_user_p
+        return
+
+    # Show completion status
+    status_placeholder.success("🎉 评分完成！")
+    time.sleep(0.5)
+    status_placeholder.empty()
+
+    # Save results
+    st.session_state.last_scores = {
+        "scores": scores,
+        "kb_history": kb_h,
+        "case_history": case_h,
+        "sys_prompt": sent_sys_p,
+        "user_prompt": sent_user_p
+    }
+
+    st.session_state.last_llm_sys_prompt = sent_sys_p
+    st.session_state.last_llm_user_prompt = sent_user_p
+
+    actual_scores = scores.get('scores', scores) if isinstance(scores, dict) else scores
+    master_comment = scores.get("master_comment", "")
+    st.session_state.last_master_comment = master_comment
+    st.session_state.last_actual_scores = actual_scores
+
+    # ===== 修复：每次评分完成后递增 score_version，使校准区域刷新显示最新结果 =====
+    st.session_state.score_version += 1
+
+
+def _render_scoring_results(user_input, embedder):
+    """渲染评分结果 - 升级版"""
+
+    # 空值保护：避免 scores 为 None 时崩溃
+    raw_scores = st.session_state.last_scores
+    if not raw_scores or not isinstance(raw_scores, dict):
+        st.warning("⚠️ 暂无评分结果")
+        return
+
+    scores_data = raw_scores.get("scores")
+    if scores_data is None:
+        st.warning("⚠️ 评分结果为空，可能是 Embedding 或 LLM 服务不可用，请重试")
+        return
+
+    # 检查是否有嵌套的 'scores' 键（AI返回的数据结构）
+    if isinstance(scores_data, dict) and 'scores' in scores_data:
+        s = scores_data['scores']
+    else:
+        s = scores_data
+
+    if s is None:
+        st.warning("⚠️ 评分数据解析失败，请重试")
+        return
+
+    mc = st.session_state.last_master_comment
+
+    # 宗师总评区域
+    st.markdown('<div class="master-comment-label">宗师总评</div>', unsafe_allow_html=True)
+    st.markdown(f'''
+    <div class="master-comment">
+        {mc}
+    </div>
+    ''', unsafe_allow_html=True)
+
+    # 风味形态图 + 六因子卡片
+    left_col, right_col = st.columns([30, 70])
+
+    with left_col:
+        st.markdown("##### 📊 风味形态")
+        st.pyplot(plot_flavor_shape(s), width='stretch')
+
+    with right_col:
+        st.markdown("##### 🏷️ 六因子评分")
+
+        cols = st.columns(2)
+        for i, f in enumerate(FACTORS):
+            if f in s:
+                d = s[f]
+                factor_info = FACTOR_COLORS.get(f, {})
+                factor_color = factor_info.get("hex", "#4A5D53")
+                factor_name_cn = factor_info.get("name", f)
+                score_hex, score_bg = get_score_color(d['score'])
+                card_class = FACTOR_CARD_CLASS.get(f, "factor-card")
+
+                with cols[i % 2]:
+                    # 使用产品卡片风格
+                    st.markdown(
+                        f'''<div class="{card_class}">
+                            <div class="factor-header">
+                                <span class="factor-name" style="display: flex; align-items: baseline;">
+                                    <span style="color: {factor_color}; margin-left: 4px;">{f}</span>
+                                    <span style="background-color: {factor_color}; color: white; padding: 2px 6px; border-radius: 4px; font-size: 0.75rem; margin-left: 6px;">
+                                        {d['score']}/9
+                                    </span>
+                                </span>
+                            </div>
+                            <div class="factor-comment" style="margin-left: 8px;">{d['comment']}</div>
+                            <div class="factor-suggestion" style="margin-left: 8px;">💡 {d.get('suggestion') or '暂无建议'}</div>
+                        </div>''',
+                        unsafe_allow_html=True
+                    )
+
+    # 校准与修正区域
+    st.markdown("---")
+    _render_calibration_ui(user_input, embedder, s, mc)
+
+
+def _render_calibration_ui(user_input, embedder, s, mc):
+    """渲染校准与修正 UI - 升级版"""
+    st.markdown("##### 🛠️ 评分校准与修正")
+
+    v = st.session_state.score_version
+
+    # 校准总评
+    cal_master = st.text_area(
+        "📝 校准总评",
+        mc,
+        key=f"cal_master_{v}",
+        height=80,
+        placeholder="请输入校准后的总评..."
     )
 
-    if new_title:
-        new_title = new_title.strip()
-    if new_text:
-        new_text = new_text.strip()
+    cal_scores = {}
+
+    # 分项调整区域
+    st.markdown("##### 🍃 分项调整")
+
+    active_factors = [f for f in FACTORS if f in s]
+    grid_cols = st.columns(3)
+
+    for i, f in enumerate(active_factors):
+        factor_color = get_factor_color(f)
+        with grid_cols[i % 3]:
+            with st.container(border=True):
+                t_col, s_col = st.columns([1, 1])
+
+                with t_col:
+                    st.markdown(
+                        f"<div style='padding-top: 5px; color: {factor_color}; font-weight: 600;'>📌 {f}</div>",
+                        unsafe_allow_html=True
+                    )
+
+                with s_col:
+                    new_score = st.number_input(
+                        "分数",
+                        0, 9,
+                        int(s[f]['score']),
+                        1,
+                        key=f"s_{f}_{v}",
+                        label_visibility="collapsed"
+                    )
+
+                # 添加评语输入框
+                comment_value = st.text_area(
+                    "评语",
+                    s[f]['comment'],
+                    key=f"c_{f}_{v}",
+                    height=70,
+                    placeholder="评语",
+                    label_visibility="collapsed"
+                )
+
+                # 添加建议输入框
+                suggestion_value = st.text_area(
+                    "建议",
+                    s[f].get('suggestion', ''),
+                    key=f"sg_{f}_{v}",
+                    height=60,
+                    placeholder="建议",
+                    label_visibility="collapsed"
+                )
+
+                cal_scores[f] = {
+                    "score": new_score,
+                    "comment": comment_value,
+                    "suggestion": suggestion_value
+                }
+
+    # 保存按钮
+    st.markdown("---")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("💾 保存校准评分", type="primary", width='stretch'):
+            _save_calibrated_score(user_input, cal_scores, cal_master, embedder)
+
+    with col2:
+        if st.button("🔄 重置校准", width='stretch'):
+            st.session_state.score_version += 1
+            st.rerun()
+
+
+def _save_calibrated_score(user_input, cal_scores, cal_master, embedder):
+    """保存校准后的评分"""
+    import time
+    import numpy as np
+    import faiss
+    from config.settings import PATHS
+    from core.resource_manager import ResourceManager
+
+    nc = {
+        "text": user_input,
+        "scores": cal_scores,
+        "master_comment": cal_master,
+        "created_at": time.strftime("%Y-%m-%d")
+    }
+
+    # 保存到进阶判例
+    supp_idx, supp_data = st.session_state.supp_cases
+
+    # 编码文本为嵌入向量
+    embedding = embedder.encode([user_input])
+
+    # 确保嵌入向量是 numpy 数组并且是二维的
+    if not isinstance(embedding, np.ndarray):
+        embedding = np.array(embedding)
+
+    # 如果是一维数组，转换为二维
+    if len(embedding.shape) == 1:
+        embedding = embedding.reshape(1, -1)
+
+    # 检查维度是否匹配
+    if embedding.shape[1] != supp_idx.d:
+        st.warning(f"⚠️ 嵌入向量维度不匹配，重新创建索引")
+
+        # 重新创建索引
+        new_dim = embedding.shape[1]
+
+        # 如果有现有数据，重新编码所有数据
+        if len(supp_data) > 0:
+            all_texts = [item["text"] for item in supp_data] + [user_input]
+            all_embeddings = embedder.encode(all_texts)
+
+            if not isinstance(all_embeddings, np.ndarray):
+                all_embeddings = np.array(all_embeddings)
+
+            # 创建新的索引
+            new_idx = faiss.IndexFlatL2(new_dim)
+            new_idx.add(all_embeddings.astype('float32'))
+
+            # 添加新数据
+            supp_data.append(nc)
+
+            # 更新 session_state
+            st.session_state.supp_cases = (new_idx, supp_data)
+
+            # 保存到文件
+            ResourceManager.save(
+                new_idx,
+                supp_data,
+                PATHS.supp_case_index,
+                PATHS.supp_case_data,
+                is_json=True
+            )
+        else:
+            # 如果没有现有数据，直接创建新索引
+            new_idx = faiss.IndexFlatL2(new_dim)
+            new_idx.add(embedding.astype('float32'))
+            supp_data.append(nc)
+            st.session_state.supp_cases = (new_idx, supp_data)
+
+            # 保存到文件
+            ResourceManager.save(
+                new_idx,
+                supp_data,
+                PATHS.supp_case_index,
+                PATHS.supp_case_data,
+                is_json=True
+            )
+    else:
+        # 维度匹配，直接添加
+        supp_data.append(nc)
+        supp_idx.add(embedding.astype('float32'))
+        st.session_state.supp_cases = (supp_idx, supp_data)
+
+        # 保存到文件
+        ResourceManager.save(
+            supp_idx,
+            supp_data,
+            PATHS.supp_case_index,
+            PATHS.supp_case_data,
+            is_json=True
+        )
+
+    st.success("✅ 校准已保存到进阶判例")
+    st.session_state.score_version += 1
+    time.sleep(0.5)
+
+
+
+
+@st.dialog("📝 本次发送给 LLM 的完整 Prompt", width="large")
+def _show_prompt_dialog():
+    """弹窗展示发送给 LLM 的系统提示词和用户提示词"""
+
+    # System Prompt
+    st.markdown("#### 🤖 System Prompt（系统提示词）")
+    sys_prompt = st.session_state.get('last_llm_sys_prompt', '(暂无)')
+    st.code(sys_prompt, language=None, height=300)
 
     st.markdown("---")
 
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        if st.button("💾 保存", type="primary", key=f"save_tea_{idx}"):
-            if not new_title or not new_text:
-                st.error("❌ 标题和内容不能为空")
-            elif len(new_title) > 50:
-                st.error("❌ 标题不能超过50个字符")
-            elif len(new_text) > 2000:
-                st.error("❌ 内容不能超过2000个字符")
-            else:
-                new_example = {"title": new_title, "text": new_text}
-
-                if idx == -1:
-                    examples.append(new_example)
-                    st.success("✅ 已添加新示例")
-                else:
-                    examples[idx] = new_example
-                    st.success("✅ 已保存修改")
-
-                ResourceManager.save_tea_examples(examples)
-                st.session_state.tea_examples = examples
-                st.session_state.editing_tea_example_idx = None
-                st.session_state.show_tea_examples = True
-                st.rerun()
-
-    with col3:
-        if st.button("❌ 取消", type="secondary", key=f"cancel_tea_{idx}"):
-            st.session_state.editing_tea_example_idx = None
-            st.session_state.show_tea_examples = True
-            st.rerun()
+    # User Prompt
+    st.markdown("#### 👤 User Prompt（用户提示词）")
+    user_prompt = st.session_state.get('last_llm_user_prompt', '(暂无)')
+    st.code(user_prompt, language=None, height=400)
