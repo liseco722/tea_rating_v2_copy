@@ -12,6 +12,9 @@ from config.constants import TEA_EXAMPLES, FACTORS
 from config.settings import PATHS
 from core.resource_manager import ResourceManager
 
+# bge-base-zh-v1.5 输出维度
+DEFAULT_EMBEDDING_DIM = 768
+
 
 # ==========================================
 # 提示词查看弹窗
@@ -47,28 +50,18 @@ def show_prompt_dialog():
 
 @st.dialog("🍵 茶评示例", width="large")
 def show_tea_examples_dialog():
-    """展示预置茶评示例文本 - 参考 app.py 的简洁实现"""
+    """展示预置茶评示例文本"""
 
-    # 副标题区域
     st.info("📜 品鉴案例精选")
-
-    # 提示信息（参考 app.py）
     st.caption("💡 以下是五组茶评示例，点击文本框即可选中复制，粘贴到「交互评分」中使用")
 
-    # 从 session_state 加载示例
     examples = st.session_state.get('tea_examples', TEA_EXAMPLES)
 
     st.divider()
 
-    # 遍历展示每个示例（平铺展示，不用 expander）
     for i, ex in enumerate(examples):
-        # 标题
         st.markdown(f"**{ex['title']}**")
-
-        # 内容显示（使用 st.code()，方便选择复制）
         st.code(ex["text"], language=None)
-
-        # 分隔线（最后一个示例后不加）
         if i < len(examples) - 1:
             st.markdown("")
 
@@ -100,10 +93,8 @@ def show_basic_cases_dialog(embedder):
 
     for idx, case in enumerate(cases):
         with st.container():
-            # 使用两列布局：左侧勾选框，右侧expander
             col1, col2 = st.columns([0.05, 0.95])
             with col1:
-                # 勾选框
                 current_value = st.session_state.basic_case_checkboxes.get(idx, False)
                 checked = st.checkbox("", key=f"basic_check_{idx}",
                                      value=current_value,
@@ -111,17 +102,13 @@ def show_basic_cases_dialog(embedder):
                 st.session_state.basic_case_checkboxes[idx] = checked
             with col2:
                 with st.expander(f"📋 判例 {idx + 1}", expanded=False):
-                    # 1. 判例描述
                     st.markdown("**📝 判例描述：**")
                     st.markdown(f"> {case.get('text', '')}")
 
-                    # 2. 六因子评分详情
                     st.markdown("---")
                     st.markdown("**🏷️ 因子评分详情：**")
 
                     scores = case.get('scores', {})
-
-                    # 分两列展示因子
                     fc1, fc2 = st.columns(2)
 
                     for i, (factor, data) in enumerate(scores.items()):
@@ -141,12 +128,10 @@ def show_basic_cases_dialog(embedder):
                                     if suggestion and suggestion != '暂无建议':
                                         st.caption(f"💡 {suggestion}")
 
-                    # 3. 宗师总评
                     st.markdown("---")
                     st.markdown("**🍵 宗师总评：**")
                     st.info(case.get('master_comment', '暂无'))
 
-                    # 4. 编辑按钮
                     st.markdown("---")
                     if st.button("✏️ 编辑此判例", key=f"edit_basic_{idx}", width='stretch'):
                         st.session_state.editing_basic_idx = idx
@@ -154,7 +139,6 @@ def show_basic_cases_dialog(embedder):
 
     st.markdown("---")
 
-    # 显示已选数量和操作按钮
     selected_count = sum(1 for v in st.session_state.basic_case_checkboxes.values() if v)
     st.markdown(f"已选择: **{selected_count}** 条")
 
@@ -172,8 +156,7 @@ def show_basic_cases_dialog(embedder):
 
 
 def _transfer_basic_to_supp(embedder):
-    """将选中的基础判例转移到进阶判例"""
-    # 1. 获取所有选中的判例索引
+    """将选中的基础判例转移到进阶判例（增量 embedding）"""
     selected_indices = [idx for idx, checked in
                        st.session_state.basic_case_checkboxes.items()
                        if checked]
@@ -181,45 +164,69 @@ def _transfer_basic_to_supp(embedder):
     if not selected_indices:
         return
 
-    # 2. 逆序删除基础判例（防止索引偏移），同时收集选中的判例
+    # 1. 收集选中的判例并从基础判例中删除
     selected_cases = []
-    for idx in reversed(selected_indices):
-        if idx < len(st.session_state.basic_cases):  # 检查索引是否有效
+    for idx in reversed(sorted(selected_indices)):
+        if idx < len(st.session_state.basic_cases):
             case = st.session_state.basic_cases.pop(idx)
             selected_cases.append(case)
 
-    # 3. 重建进阶判例的FAISS索引
+    # 2. 保存更新后的基础判例
+    ResourceManager.save_json(st.session_state.basic_cases, PATHS.basic_case_data)
+
+    # 3. 为每个新判例生成向量并添加到进阶判例
     supp_idx, supp_data = st.session_state.supp_cases
 
-    # 为每个新判例生成向量并添加到FAISS索引
     for case in selected_cases:
         text = case.get("text", "")
-        if text:
+        supp_data.append(case)
+
+        if text and embedder:
             try:
-                # 获取嵌入向量
-                vectors = embedder.embed_texts([text])
-                if vectors and len(vectors) > 0:
-                    vector = vectors[0]
-                    supp_idx.add(np.array([vector]).astype('float32'))
+                embedding = embedder.encode([text])
+                if not isinstance(embedding, np.ndarray):
+                    embedding = np.array(embedding, dtype=np.float32)
+                if len(embedding.shape) == 1:
+                    embedding = embedding.reshape(1, -1)
+
+                # 检查维度
+                if supp_idx.ntotal > 0 and embedding.shape[1] != supp_idx.d:
+                    # 维度不匹配，标记需要重建（稍后统一处理）
+                    continue
+
+                if supp_idx.ntotal == 0 and supp_idx.d != embedding.shape[1]:
+                    # 空索引但维度不对，重建
+                    supp_idx = faiss.IndexFlatL2(embedding.shape[1])
+
+                supp_idx.add(embedding.astype('float32'))
             except Exception as e:
                 print(f"生成向量失败: {e}")
 
-        # 添加到数据列表
-        supp_data.append(case)
+    # 4. 如果向量数量和数据数量不匹配，全量重建
+    if supp_idx.ntotal != len(supp_data) and embedder:
+        try:
+            all_texts = [item.get("text", "") for item in supp_data]
+            all_embeddings = embedder.encode(all_texts)
+            if not isinstance(all_embeddings, np.ndarray):
+                all_embeddings = np.array(all_embeddings, dtype=np.float32)
 
-    # 4. 保存到文件
+            new_idx = faiss.IndexFlatL2(all_embeddings.shape[1])
+            new_idx.add(all_embeddings.astype('float32'))
+            supp_idx = new_idx
+        except Exception as e:
+            print(f"全量重建索引失败: {e}")
+
+    # 5. 保存进阶判例
     ResourceManager.save(supp_idx, supp_data,
                         PATHS.supp_case_index,
                         PATHS.supp_case_data,
                         is_json=True)
 
-    # 5. 更新session_state
     st.session_state.supp_cases = (supp_idx, supp_data)
 
     # 6. 清空勾选状态
     st.session_state.basic_case_checkboxes = {}
 
-    # 7. 提示用户
     st.success(f"✅ 已成功转移 {len(selected_cases)} 条到进阶判例！")
     time.sleep(0.5)
     st.rerun()
@@ -243,7 +250,6 @@ def edit_basic_case_dialog(idx: int):
     """, unsafe_allow_html=True)
 
     with st.form(f"edit_basic_form_{idx}"):
-        # 判例描述
         f_txt = st.text_area(
             "📝 判例描述",
             case.get('text', ''),
@@ -293,7 +299,6 @@ def edit_basic_case_dialog(idx: int):
                     "suggestion": sug
                 }
 
-        # 宗师总评
         f_master = st.text_area(
             "🍵 宗师总评",
             case.get('master_comment', ''),
@@ -307,7 +312,6 @@ def edit_basic_case_dialog(idx: int):
 
         with col1:
             if st.form_submit_button("💾 保存修改", type="primary", width='stretch'):
-                # 更新判例数据
                 cases[idx] = {
                     "text": f_txt,
                     "scores": input_scores,
@@ -315,6 +319,8 @@ def edit_basic_case_dialog(idx: int):
                     "created_at": case.get('created_at', time.strftime("%Y-%m-%d %H:%M:%S"))
                 }
                 st.session_state.basic_cases = cases
+                # 保存到文件
+                ResourceManager.save_json(cases, PATHS.basic_case_data)
                 st.session_state.editing_basic_idx = None
                 st.success("✅ 已保存修改！")
                 time.sleep(0.5)
@@ -344,7 +350,6 @@ def show_supp_cases_dialog(embedder):
         """, unsafe_allow_html=True)
         return
 
-    # 初始化勾选状态存储
     if 'supp_case_checkboxes' not in st.session_state:
         st.session_state.supp_case_checkboxes = {}
 
@@ -353,10 +358,8 @@ def show_supp_cases_dialog(embedder):
 
     for idx, case in enumerate(cases):
         with st.container():
-            # 使用两列布局：左侧勾选框，右侧expander
             col1, col2 = st.columns([0.05, 0.95])
             with col1:
-                # 勾选框
                 current_value = st.session_state.supp_case_checkboxes.get(idx, False)
                 checked = st.checkbox("", key=f"supp_check_{idx}",
                                      value=current_value,
@@ -364,17 +367,13 @@ def show_supp_cases_dialog(embedder):
                 st.session_state.supp_case_checkboxes[idx] = checked
             with col2:
                 with st.expander(f"📋 判例 {idx + 1}", expanded=False):
-                    # 1. 判例描述
                     st.markdown("**📝 判例描述：**")
                     st.markdown(f"> {case.get('text', '')}")
 
-                    # 2. 六因子评分详情
                     st.markdown("---")
                     st.markdown("**🏷️ 因子评分详情：**")
 
                     scores = case.get('scores', {})
-
-                    # 分两列展示因子
                     fc1, fc2 = st.columns(2)
 
                     for i, (factor, data) in enumerate(scores.items()):
@@ -394,12 +393,10 @@ def show_supp_cases_dialog(embedder):
                                     if suggestion and suggestion != '暂无建议':
                                         st.caption(f"💡 {suggestion}")
 
-                    # 3. 宗师总评
                     st.markdown("---")
                     st.markdown("**🍵 宗师总评：**")
                     st.info(case.get('master_comment', '暂无'))
 
-                    # 4. 编辑按钮
                     st.markdown("---")
                     if st.button("✏️ 编辑此判例", key=f"edit_supp_{idx}", width='stretch'):
                         st.session_state.editing_supp_idx = idx
@@ -407,7 +404,6 @@ def show_supp_cases_dialog(embedder):
 
     st.markdown("---")
 
-    # 显示已选数量和操作按钮
     selected_count = sum(1 for v in st.session_state.supp_case_checkboxes.values() if v)
     st.markdown(f"已选择: **{selected_count}** 条")
 
@@ -425,8 +421,7 @@ def show_supp_cases_dialog(embedder):
 
 
 def _transfer_supp_to_basic(embedder):
-    """将选中的进阶判例转移到基础判例"""
-    # 1. 获取所有选中的判例索引
+    """将选中的进阶判例转移到基础判例（使用 faiss.reconstruct 避免重新 embedding）"""
     selected_indices = [idx for idx, checked in
                        st.session_state.supp_case_checkboxes.items()
                        if checked]
@@ -434,65 +429,74 @@ def _transfer_supp_to_basic(embedder):
     if not selected_indices:
         return
 
-    # 2. 获取当前进阶判例数据
     supp_idx, supp_data = st.session_state.supp_cases
 
-    # 3. 逆序删除进阶判例（防止索引偏移），同时收集选中的判例
+    # 1. 收集选中的判例
     selected_cases = []
-    for idx in reversed(selected_indices):
-        if idx < len(supp_data):  # 检查索引是否有效
-            case = supp_data.pop(idx)
-            selected_cases.append(case)
+    for idx in sorted(selected_indices):
+        if idx < len(supp_data):
+            selected_cases.append(supp_data[idx])
 
-    # 4. 重建FAISS索引（因为删除了向量）
-    if len(supp_data) > 0:
-        # 为剩余数据重新生成向量
-        new_vectors = []
-        for case in supp_data:
-            text = case.get("text", "")
-            if text:
-                try:
-                    vectors = embedder.embed_texts([text])
-                    if vectors and len(vectors) > 0:
-                        new_vectors.append(vectors[0])
-                except Exception as e:
-                    print(f"生成向量失败: {e}")
+    # 2. 计算要保留的索引
+    all_indices = set(range(len(supp_data)))
+    remove_indices = set(selected_indices)
+    keep_indices = sorted(all_indices - remove_indices)
 
-        # 重建索引
-        if new_vectors:
-            dim = len(new_vectors[0])
-            new_idx = faiss.IndexFlatL2(dim)
-            new_idx.add(np.array(new_vectors).astype('float32'))
-            supp_idx = new_idx
-        else:
-            supp_idx = faiss.IndexFlatL2(1536)  # 默认维度
+    # 3. 构建新的 supp_data（只保留未选中的）
+    new_supp_data = [supp_data[i] for i in keep_indices]
+
+    # 4. 重建 FAISS 索引（使用 reconstruct 避免重新 embedding）
+    if len(new_supp_data) > 0 and supp_idx.ntotal > 0:
+        try:
+            # 从现有索引中提取保留的向量
+            dim = supp_idx.d
+            keep_vectors = []
+            for i in keep_indices:
+                if i < supp_idx.ntotal:
+                    vec = supp_idx.reconstruct(i)
+                    keep_vectors.append(vec)
+
+            if keep_vectors:
+                keep_vectors_array = np.array(keep_vectors, dtype=np.float32)
+                new_idx = faiss.IndexFlatL2(dim)
+                new_idx.add(keep_vectors_array)
+            else:
+                new_idx = faiss.IndexFlatL2(dim)
+        except Exception as e:
+            print(f"从索引提取向量失败，尝试重新编码: {e}")
+            # 回退：重新编码
+            try:
+                all_texts = [item.get("text", "") for item in new_supp_data]
+                all_embeddings = embedder.encode(all_texts)
+                if not isinstance(all_embeddings, np.ndarray):
+                    all_embeddings = np.array(all_embeddings, dtype=np.float32)
+                new_idx = faiss.IndexFlatL2(all_embeddings.shape[1])
+                new_idx.add(all_embeddings.astype('float32'))
+            except Exception as e2:
+                print(f"重新编码也失败: {e2}")
+                new_idx = faiss.IndexFlatL2(DEFAULT_EMBEDDING_DIM)
     else:
-        supp_idx = faiss.IndexFlatL2(1536)  # 空库使用默认维度
+        new_idx = faiss.IndexFlatL2(supp_idx.d if supp_idx and supp_idx.d > 0 else DEFAULT_EMBEDDING_DIM)
 
-    # 5. 先添加到基础判例并保存（优先保存，避免数据丢失）
+    # 5. 添加到基础判例并保存
     for case in reversed(selected_cases):
         st.session_state.basic_cases.append(case)
-
     ResourceManager.save_json(st.session_state.basic_cases, PATHS.basic_case_data)
 
-    # 6. 再保存进阶判例到文件
+    # 6. 保存进阶判例
     try:
-        ResourceManager.save(supp_idx, supp_data,
+        ResourceManager.save(new_idx, new_supp_data,
                             PATHS.supp_case_index,
                             PATHS.supp_case_data,
                             is_json=True)
-
-        # 7. 更新session_state
-        st.session_state.supp_cases = (supp_idx, supp_data)
+        st.session_state.supp_cases = (new_idx, new_supp_data)
     except Exception as e:
-        # 如果进阶判例保存失败，至少基础判例已经保存了
         st.error(f"⚠️ 进阶判例索引保存失败: {e}")
         st.warning("基础判例已保存，但进阶判例可能未更新。请刷新后检查。")
 
-    # 8. 清空勾选状态
+    # 7. 清空勾选状态
     st.session_state.supp_case_checkboxes = {}
 
-    # 9. 提示用户
     st.success(f"✅ 已成功转移 {len(selected_cases)} 条到基础判例！")
     time.sleep(0.5)
     st.rerun()
@@ -500,7 +504,7 @@ def _transfer_supp_to_basic(embedder):
 
 @st.dialog("✏️ 编辑进阶判例", width="large")
 def edit_supp_case_dialog(idx: int, embedder):
-    """编辑指定进阶判例 - 完整表单编辑"""
+    """编辑指定进阶判例 - 完整表单编辑（文本变更时更新 embedding）"""
     _, cases = st.session_state.supp_cases
 
     if idx >= len(cases):
@@ -508,6 +512,7 @@ def edit_supp_case_dialog(idx: int, embedder):
         return
 
     case = cases[idx]
+    original_text = case.get('text', '')
 
     st.markdown(f"""
     <div style="padding: 12px; background: #F5F9F5; border-radius: 8px; margin-bottom: 20px;">
@@ -516,7 +521,6 @@ def edit_supp_case_dialog(idx: int, embedder):
     """, unsafe_allow_html=True)
 
     with st.form(f"edit_supp_form_{idx}"):
-        # 判例描述
         f_txt = st.text_area(
             "📝 判例描述",
             case.get('text', ''),
@@ -566,7 +570,6 @@ def edit_supp_case_dialog(idx: int, embedder):
                     "suggestion": sug
                 }
 
-        # 宗师总评
         f_master = st.text_area(
             "🍵 宗师总评",
             case.get('master_comment', ''),
@@ -587,8 +590,55 @@ def edit_supp_case_dialog(idx: int, embedder):
                     "master_comment": f_master,
                     "created_at": case.get('created_at', time.strftime("%Y-%m-%d %H:%M:%S"))
                 }
-                # 保存到 session_state
-                st.session_state.supp_cases = (st.session_state.supp_cases[0], cases)
+
+                supp_idx = st.session_state.supp_cases[0]
+
+                # ===== 如果文本发生变化，需要更新对应的 embedding =====
+                if f_txt != original_text and embedder:
+                    try:
+                        # 重新编码新文本
+                        new_embedding = embedder.encode([f_txt])
+                        if not isinstance(new_embedding, np.ndarray):
+                            new_embedding = np.array(new_embedding, dtype=np.float32)
+                        if len(new_embedding.shape) == 1:
+                            new_embedding = new_embedding.reshape(1, -1)
+
+                        # FAISS IndexFlatL2 不支持原地更新，需要重建
+                        # 提取所有现有向量，替换修改的那个
+                        dim = supp_idx.d
+                        total = supp_idx.ntotal
+                        if total > 0 and new_embedding.shape[1] == dim:
+                            all_vectors = np.zeros((total, dim), dtype=np.float32)
+                            for i in range(total):
+                                all_vectors[i] = supp_idx.reconstruct(i)
+
+                            # 替换修改位置的向量
+                            if idx < total:
+                                all_vectors[idx] = new_embedding[0]
+
+                            new_idx = faiss.IndexFlatL2(dim)
+                            new_idx.add(all_vectors)
+                            supp_idx = new_idx
+                        else:
+                            # 维度不匹配或索引为空，全量重建
+                            all_texts = [item.get("text", "") for item in cases]
+                            all_embeddings = embedder.encode(all_texts)
+                            if not isinstance(all_embeddings, np.ndarray):
+                                all_embeddings = np.array(all_embeddings, dtype=np.float32)
+                            new_idx = faiss.IndexFlatL2(all_embeddings.shape[1])
+                            new_idx.add(all_embeddings.astype('float32'))
+                            supp_idx = new_idx
+
+                    except Exception as e:
+                        st.warning(f"⚠️ 向量更新失败: {e}，索引可能需要手动重建")
+
+                # 保存到 session_state 和文件
+                st.session_state.supp_cases = (supp_idx, cases)
+                ResourceManager.save(supp_idx, cases,
+                                    PATHS.supp_case_index,
+                                    PATHS.supp_case_data,
+                                    is_json=True)
+
                 st.session_state.editing_supp_idx = None
                 st.success("✅ 已保存修改！")
                 time.sleep(0.5)
@@ -613,13 +663,11 @@ def manage_tea_examples_dialog():
     </div>
     """, unsafe_allow_html=True)
 
-    # 加载示例列表
-    examples = st.session_state.get('tea_examples', TEA_EXAMPLES[:])  # 复制一份
+    examples = st.session_state.get('tea_examples', TEA_EXAMPLES[:])
 
     st.markdown(f"**📊 共 {len(examples)} 个示例**")
     st.markdown("---")
 
-    # 显示所有示例
     for idx, ex in enumerate(examples):
         with st.container(border=True):
             col1, col2, col3 = st.columns([5, 1, 1])
@@ -643,12 +691,11 @@ def manage_tea_examples_dialog():
 
     st.markdown("---")
 
-    # 底部按钮
     col1, col2, col3, col4 = st.columns(4)
 
     with col1:
         if st.button("➕ 新增示例", type="primary", width='stretch'):
-            st.session_state.editing_tea_example_idx = -1  # -1 表示新增
+            st.session_state.editing_tea_example_idx = -1
             st.rerun()
 
     with col2:
@@ -666,11 +713,9 @@ def manage_tea_examples_dialog():
 @st.dialog("✏️ 编辑茶评示例", width="large")
 def edit_tea_example_dialog(idx: int):
     """编辑指定茶评示例"""
-    # 加载当前示例列表
     examples = st.session_state.get('tea_examples', TEA_EXAMPLES[:])
 
     if idx == -1:
-        # 新增模式
         st.markdown("""
         <div style="padding: 12px; background: #EDF5EB; border-radius: 8px; margin-bottom: 20px;">
             <span style="color: #4A5D53; font-weight: 600;">➕ 新增茶评示例</span>
@@ -679,7 +724,6 @@ def edit_tea_example_dialog(idx: int):
         current_title = ""
         current_text = ""
     else:
-        # 编辑模式
         if idx >= len(examples):
             st.error("❌ 示例索引无效")
             return
@@ -692,13 +736,12 @@ def edit_tea_example_dialog(idx: int):
         current_title = examples[idx]['title']
         current_text = examples[idx]['text']
 
-    # 编辑表单
     new_title = st.text_input(
         "标题",
         current_title,
         key=f"tea_title_{idx}",
         placeholder="例如：🌸 桂花乌龙",
-        max_chars=50  # 限制标题长度
+        max_chars=50
     )
     new_text = st.text_area(
         "内容",
@@ -706,10 +749,9 @@ def edit_tea_example_dialog(idx: int):
         height=200,
         key=f"tea_text_{idx}",
         placeholder="请输入茶评描述...",
-        max_chars=2000  # 限制内容长度
+        max_chars=2000
     )
 
-    # 输入验证：去除首尾空格
     if new_title:
         new_title = new_title.strip()
     if new_text:
@@ -731,23 +773,20 @@ def edit_tea_example_dialog(idx: int):
                 new_example = {"title": new_title, "text": new_text}
 
                 if idx == -1:
-                    # 新增
                     examples.append(new_example)
                     st.success("✅ 已添加新示例")
                 else:
-                    # 更新
                     examples[idx] = new_example
                     st.success("✅ 已保存修改")
 
-                # 保存到文件和 session_state
                 ResourceManager.save_tea_examples(examples)
                 st.session_state.tea_examples = examples
                 st.session_state.editing_tea_example_idx = None
-                st.session_state.show_tea_examples = True  # 返回示例列表
+                st.session_state.show_tea_examples = True
                 st.rerun()
 
     with col3:
         if st.button("❌ 取消", type="secondary", key=f"cancel_tea_{idx}"):
             st.session_state.editing_tea_example_idx = None
-            st.session_state.show_tea_examples = True  # 返回主弹窗
+            st.session_state.show_tea_examples = True
             st.rerun()
