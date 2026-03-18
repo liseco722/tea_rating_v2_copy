@@ -9,6 +9,7 @@ from typing import List, Tuple
 
 # 导入其他模块
 from .resource_manager import ResourceManager
+from .github_sync import GithubSync
 from .ai_services import SelfHostedEmbedder, llm_normalize_user_input
 from .scoring import run_scoring
 
