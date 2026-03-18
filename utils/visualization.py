@@ -10,6 +10,8 @@ import matplotlib
 matplotlib.use('Agg')  # 确保使用非交互式后端
 import matplotlib.pyplot as plt
 from matplotlib.font_manager import FontProperties, FontManager
+import matplotlib.font_manager as fm
+from matplotlib.ft2font import FT2Font
 from scipy.interpolate import make_interp_spline
 import logging
 import platform
@@ -57,72 +59,98 @@ else:  # Linux
 _font_cache = None
 
 
-def _find_available_chinese_font() -> str:
+def _font_supports_text(font_path: str, sample_text: str = "香味韵") -> bool:
+    """检查字体文件是否真的包含指定中文字符。"""
+    try:
+        ft_font = FT2Font(font_path)
+        charmap = ft_font.get_charmap()
+        return all(ord(ch) in charmap for ch in sample_text if ch.strip())
+    except Exception as e:
+        logger.debug(f"字体 glyph 检测失败: {font_path}, {e}")
+        return False
+
+
+def _resolve_font_entry(font_name: str):
+    """根据字体名称解析 Matplotlib 实际可用的字体条目。"""
+    try:
+        for entry in fm.fontManager.ttflist:
+            if entry.name == font_name:
+                return entry
+    except Exception as e:
+        logger.debug(f"解析字体条目失败: {font_name}, {e}")
+    return None
+
+
+def _find_available_chinese_font() -> dict:
     """
-    跨平台动态检测系统中可用的中文字体
+    跨平台动态检测 Matplotlib 真正可用且支持中文 glyph 的字体。
 
     Returns:
-        str: 可用的中文字体名称
+        dict: {"name": 字体名, "path": 字体文件路径, "supports_chinese": 是否支持中文}
     """
     global _font_cache
 
     if _font_cache is not None:
         return _font_cache
 
-    # Windows 系统直接返回微软雅黑（绕过 Matplotlib 字体检测）
-    if platform.system() == 'Windows':
-        logger.info("✅ Windows 系统，直接使用微软雅黑")
-        _font_cache = "Microsoft YaHei"
-        return "Microsoft YaHei"
-
     try:
-        font_manager = FontManager()
-        available_fonts = set(font_manager.get_names())
-
+        _ = FontManager()  # 触发/刷新 Matplotlib 字体管理器
+        font_entries = list(fm.fontManager.ttflist)
+        available_fonts = {entry.name for entry in font_entries if getattr(entry, "name", None)}
         logger.info(f"🔍 系统: {platform.system()}, 检测到 {len(available_fonts)} 个字体")
 
-        # 按优先级查找可用字体
+        candidates = []
         for preferred_font in FONT_PREFERENCES:
             if preferred_font in available_fonts:
-                logger.info(f"✅ 使用中文字体: {preferred_font}")
-                _font_cache = preferred_font
-                return preferred_font
+                candidates.append(preferred_font)
 
-        # 模糊匹配：查找包含中文字体关键词的字体
-        fallback_keywords = ['cjk', 'chinese', 'sc', 'tc', 'noto', 'yahei', 'simhei', 'pingfang', 'wqy']
-        fallback_fonts = [f for f in available_fonts if any(
-            keyword in f.lower() for keyword in fallback_keywords
-        )]
+        fallback_keywords = ['cjk', 'chinese', 'sc', 'tc', 'noto', 'yahei', 'simhei', 'pingfang', 'wqy', 'song', 'hei']
+        fallback_fonts = [
+            f for f in sorted(available_fonts)
+            if any(keyword in f.lower() for keyword in fallback_keywords) and f not in candidates
+        ]
+        candidates.extend(fallback_fonts)
 
-        if fallback_fonts:
-            logger.warning(f"⚠️ 使用备选字体: {fallback_fonts[0]}")
-            _font_cache = fallback_fonts[0]
-            return fallback_fonts[0]
+        for candidate in candidates:
+            entry = _resolve_font_entry(candidate)
+            if not entry:
+                continue
+            if _font_supports_text(entry.fname):
+                _font_cache = {
+                    "name": entry.name,
+                    "path": entry.fname,
+                    "supports_chinese": True
+                }
+                logger.info(f"✅ 使用中文字体: {entry.name} ({entry.fname})")
+                return _font_cache
+            logger.warning(f"⚠️ 字体存在但不支持完整中文 glyph: {entry.name} ({entry.fname})")
 
-        # 未找到任何中文字体
-        logger.error("❌ 未找到中文字体，将使用拼音标签")
-        _font_cache = "DejaVu Sans"
+        logger.error("❌ 未找到可用中文字体，将降级为英文标签")
+        _font_cache = {
+            "name": "DejaVu Sans",
+            "path": None,
+            "supports_chinese": False
+        }
         return _font_cache
 
     except Exception as e:
         logger.error(f"字体检测失败: {e}", exc_info=True)
-        _font_cache = "DejaVu Sans"
+        _font_cache = {
+            "name": "DejaVu Sans",
+            "path": None,
+            "supports_chinese": False
+        }
         return _font_cache
 
 
 def _get_chinese_font_prop(size: int = 12, weight: str = 'normal') -> FontProperties:
     """
-    获取中文字体属性对象
-
-    Args:
-        size: 字体大小
-        weight: 字体粗细 ('normal', 'bold', 'light')
-
-    Returns:
-        FontProperties: 字体属性对象
+    获取中文字体属性对象。优先基于字体文件路径构造，避免仅凭 family 名称导致 fallback 失效。
     """
-    font_name = _find_available_chinese_font()
-    return FontProperties(family=font_name, size=size, weight=weight)
+    font_info = _find_available_chinese_font()
+    if font_info.get("path"):
+        return FontProperties(fname=font_info["path"], size=size, weight=weight)
+    return FontProperties(family=font_info["name"], size=size, weight=weight)
 
 
 # ==========================================
@@ -130,10 +158,13 @@ def _get_chinese_font_prop(size: int = 12, weight: str = 'normal') -> FontProper
 # ==========================================
 
 _available_font = _find_available_chinese_font()
-plt.rcParams['font.sans-serif'] = [_available_font] + FONT_PREFERENCES
+plt.rcParams['font.sans-serif'] = [
+    _available_font['name'],
+    *[font for font in FONT_PREFERENCES if font != _available_font['name']]
+]
 plt.rcParams['axes.unicode_minus'] = False
 
-logger.info(f"📝 Matplotlib 字体: {_available_font}")
+logger.info(f"📝 Matplotlib 字体: {_available_font['name']}")
 
 
 # ==========================================
@@ -316,10 +347,10 @@ def plot_flavor_shape(scores_data):
 
     # ========== 显式指定中文字体 ==========
 
-    font_name = _find_available_chinese_font()
-    has_chinese_font = font_name != "DejaVu Sans"
+    font_info = _find_available_chinese_font()
+    has_chinese_font = font_info.get('supports_chinese', False)
 
-    logger.debug(f"绘制风味形态图，使用字体: {font_name}")
+    logger.debug(f"绘制风味形态图，使用字体: {font_info['name']}")
 
     if has_chinese_font:
         # 有中文字体：使用中文标签 + 显式 FontProperties
