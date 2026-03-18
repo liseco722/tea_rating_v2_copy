@@ -79,21 +79,48 @@ if 'loaded' not in st.session_state:
         st.session_state.kb = (kb_idx, kb_data)
         st.session_state.kb_files = ResourceManager.load_kb_files()
     except:
-        pass
-    logger.info(f"  → 知识库: {len(kb_data)} 个片段")
+        st.session_state.kb = (None, [])
+        st.session_state.kb_files = []
+        kb_data = []
+    logger.info(f"  → 知识库: {len(st.session_state.kb[1])} 个片段")
 
     # 2. 加载判例库（基础 + 进阶）
     logger.info("步骤 2/5: 加载判例库...")
     st.session_state.basic_cases = ResourceManager.load_external_json(PATHS.basic_case_data, fallback=[])
-    supp_idx = ResourceManager.load(PATHS.supp_case_index, PATHS.supp_case_data, is_json=True)
-    supp_data = ResourceManager.load_external_json(PATHS.basic_case_data, fallback=[])
+
+    # ===== 修复：从正确的 supp_case_data 路径加载进阶判例 =====
+    supp_data = ResourceManager.load_external_json(PATHS.supp_case_data, fallback=[])
+
+    # 尝试加载进阶判例的 FAISS 索引
+    if PATHS.supp_case_index.exists():
+        try:
+            import faiss
+            supp_idx = faiss.read_index(str(PATHS.supp_case_index))
+            logger.info(f"  → 进阶判例索引已加载，维度={supp_idx.d}，向量数={supp_idx.ntotal}")
+        except Exception as e:
+            logger.warning(f"  ⚠️ 进阶判例索引加载失败: {e}")
+            import faiss
+            supp_idx = faiss.IndexFlatL2(768)
+    else:
+        import faiss
+        supp_idx = faiss.IndexFlatL2(768)
+        logger.info("  → 进阶判例索引不存在，使用空索引")
+
+    # ===== 标记：如果有 supp_data 但索引为空或不存在，稍后需要重建 =====
+    if len(supp_data) > 0 and (supp_idx.ntotal == 0 or supp_idx.ntotal != len(supp_data)):
+        st.session_state.supp_index_needs_rebuild = True
+        logger.info(f"  ⚠️ 进阶判例数据 {len(supp_data)} 条，索引向量 {supp_idx.ntotal} 条，需要重建索引")
+    else:
+        st.session_state.supp_index_needs_rebuild = False
+
     st.session_state.supp_cases = (supp_idx, supp_data)
     logger.info(f"  → 基础判例: {len(st.session_state.basic_cases)} 条")
     logger.info(f"  → 进阶判例: {len(supp_data)} 条")
 
     # 3. RAG 延迟加载标记
     logger.info("步骤 3/5: 检查 RAG 状态...")
-    if len(kb_data) == 0:
+    kb_data = st.session_state.kb[1]
+    if not kb_data or len(kb_data) == 0:
         st.session_state.rag_loading_needed = True
         st.session_state.rag_loading_status = "pending"
         logger.info("  ⚠️ 本地知识库为空，将在侧边栏加载")
@@ -146,6 +173,38 @@ embedder, client, client_d, model_id = render_sidebar()
 if 'cases_bootstrapped' not in st.session_state:
     bootstrap_cases(embedder)
     st.session_state.cases_bootstrapped = True
+
+# ===== 自动重建进阶判例索引（在 embedder 可用后执行） =====
+if st.session_state.get('supp_index_needs_rebuild', False) and embedder:
+    import faiss
+    import numpy as np
+
+    supp_idx, supp_data = st.session_state.supp_cases
+    if len(supp_data) > 0:
+        try:
+            with st.spinner("🔄 正在重建进阶判例索引..."):
+                all_texts = [item.get("text", "") for item in supp_data]
+                all_embeddings = embedder.encode(all_texts)
+
+                if not isinstance(all_embeddings, np.ndarray):
+                    all_embeddings = np.array(all_embeddings, dtype=np.float32)
+
+                new_idx = faiss.IndexFlatL2(all_embeddings.shape[1])
+                new_idx.add(all_embeddings.astype('float32'))
+
+                st.session_state.supp_cases = (new_idx, supp_data)
+
+                # 持久化
+                ResourceManager.save(
+                    new_idx, supp_data,
+                    PATHS.supp_case_index, PATHS.supp_case_data,
+                    is_json=True
+                )
+                logger.info(f"✅ 进阶判例索引已重建: {new_idx.ntotal} 条向量，维度={new_idx.d}")
+        except Exception as e:
+            logger.error(f"❌ 进阶判例索引重建失败: {e}")
+
+    st.session_state.supp_index_needs_rebuild = False
 
 
 # ==========================================
