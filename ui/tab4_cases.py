@@ -198,7 +198,7 @@ def _render_batch_add_section(case_type: str):
     )
 
     # 下载模板按钮
-    template_path = PATH.template_file
+    template_path = PATHS.template_file
     if template_path:
         with open(template_path, 'rb') as f:
             template_data = f.read()
