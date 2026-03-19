@@ -216,7 +216,7 @@ def _render_manual_add_form(case_type: str, embedder):
 
 def _render_batch_add_section(case_type: str):
     """渲染批量添加区域 - 升级版"""
-    from config.settings import Paths
+    from config.settings import PATHS
     st.caption("📋 请按照模板格式填写判例数据")
 
     # 文件上传
@@ -228,7 +228,7 @@ def _render_batch_add_section(case_type: str):
     )
 
     # 下载模板按钮 - 使用相对路径
-    template_path = Paths.template_file
+    template_path = PATHS.template_file
     if template_path:
         with open(template_path, 'rb') as f:
             template_data = f.read()
