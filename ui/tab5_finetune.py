@@ -190,6 +190,7 @@ def _render_manual_data_section():
 def _render_auto_fill_section():
     """渲染自动填充数据区域 - 升级版"""
     from core.resource_manager import ResourceManager
+    import time
     st.markdown("""
     <div style="padding: 12px; background: #EDF5EB; border-radius: 8px; margin-bottom: 10px; border-left: 4px solid #6BAA4A;">
         <div style="color: #2D4A1C; font-weight: 600; margin-bottom: 4px;">🤖 自动填充数据</div>
