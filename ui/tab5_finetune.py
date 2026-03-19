@@ -200,6 +200,8 @@ def _render_auto_fill_section():
     st.caption("💡 自动跳过重复数据")
 
     if st.button("➕ 基础判例 → 微调数据", width='stretch', key="ft_add_basic"):
+        sys_tpl = st.session_state.prompt_config.get('system_template', '')
+        user_tpl = st.session_state.prompt_config.get('user_template', '')
         if not st.session_state.basic_cases:
             st.warning("基础判例库为空")
         else:
@@ -211,6 +213,8 @@ def _render_auto_fill_section():
             st.rerun()
 
     if st.button("➕ 进阶判例 → 微调数据", width='stretch', key="ft_add_supp"):
+        sys_tpl = st.session_state.prompt_config.get('system_template', '')
+        user_tpl = st.session_state.prompt_config.get('user_template', '')
         _, supp_data = st.session_state.supp_cases
         if not supp_data:
             st.warning("进阶判例库为空")
