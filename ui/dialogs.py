@@ -79,7 +79,7 @@ def show_tea_examples_dialog():
 
 @st.dialog("📋 基础判例列表", width="large")
 def show_basic_cases_dialog(embedder):
-    """展示当前基础判例列表 - 升级版（支持勾选转移到进阶判例）"""
+    """展示当前基础判例列表 - 优化版（分页 + 删除 + 转移）"""
     cases = st.session_state.basic_cases
 
     if not cases:
@@ -95,70 +95,84 @@ def show_basic_cases_dialog(embedder):
     if 'basic_case_checkboxes' not in st.session_state:
         st.session_state.basic_case_checkboxes = {}
 
-    st.markdown(f"**📊 共 {len(cases)} 条基础判例**")
+    # 分页配置
+    PAGE_SIZE = 10
+    total = len(cases)
+    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+
+    if 'basic_dialog_page' not in st.session_state:
+        st.session_state.basic_dialog_page = 0
+    current_page = st.session_state.basic_dialog_page
+    current_page = min(current_page, total_pages - 1)
+
+    st.markdown(f"**📊 共 {total} 条基础判例**")
+
+    # 分页导航
+    if total_pages > 1:
+        col_prev, col_info, col_next = st.columns([1, 2, 1])
+        with col_prev:
+            if st.button("⬅️ 上一页", disabled=current_page <= 0, key="basic_prev"):
+                st.session_state.basic_dialog_page = current_page - 1
+                st.rerun()
+        with col_info:
+            st.markdown(f"<div style='text-align:center; padding-top:6px;'>第 {current_page + 1}/{total_pages} 页</div>", unsafe_allow_html=True)
+        with col_next:
+            if st.button("下一页 ➡️", disabled=current_page >= total_pages - 1, key="basic_next"):
+                st.session_state.basic_dialog_page = current_page + 1
+                st.rerun()
+
     st.markdown("---")
 
-    for idx, case in enumerate(cases):
+    # 当前页数据
+    start = current_page * PAGE_SIZE
+    end = min(start + PAGE_SIZE, total)
+
+    for idx in range(start, end):
+        case = cases[idx]
         with st.container():
-            # 使用两列布局：左侧勾选框，右侧expander
-            col1, col2 = st.columns([0.05, 0.95])
-            with col1:
-                # 勾选框
+            col_chk, col_main = st.columns([0.05, 0.95])
+            with col_chk:
                 current_value = st.session_state.basic_case_checkboxes.get(idx, False)
                 checked = st.checkbox("", key=f"basic_check_{idx}",
                                      value=current_value,
                                      label_visibility="collapsed")
                 st.session_state.basic_case_checkboxes[idx] = checked
-            with col2:
-                with st.expander(f"📋 判例 {idx + 1}", expanded=False):
-                    # 1. 判例描述
-                    st.markdown("**📝 判例描述：**")
+            with col_main:
+                # 精简摘要视图
+                text_preview = (case.get('text', '') or '')[:100]
+                if len(case.get('text', '')) > 100:
+                    text_preview += "..."
+                scores = case.get('scores', {})
+                score_summary = " | ".join(
+                    f"{f}: {d.get('score', '-')}" for f, d in scores.items()
+                ) if scores else "暂无评分"
+
+                with st.expander(f"📋 判例 {idx + 1}　—　{text_preview[:30]}...", expanded=False):
                     st.markdown(f"> {case.get('text', '')}")
+                    st.caption(f"🏷️ {score_summary}")
+                    st.caption(f"🍵 总评：{(case.get('master_comment', '暂无') or '暂无')[:80]}")
 
-                    # 2. 六因子评分详情
-                    st.markdown("---")
-                    st.markdown("**🏷️ 因子评分详情：**")
-
-                    scores = case.get('scores', {})
-
-                    # 分两列展示因子
-                    fc1, fc2 = st.columns(2)
-
-                    for i, (factor, data) in enumerate(scores.items()):
-                        with (fc1 if i % 2 == 0 else fc2):
-                            with st.container(border=True):
-                                st.markdown(f"**{factor}**")
-                                score_val = data.get('score', '-')
-                                comment = data.get('comment', '暂无评语')
-                                suggestion = data.get('suggestion', '暂无建议')
-
-                                col_s, col_d = st.columns([1, 2])
-                                with col_s:
-                                    st.markdown(f"<span style='font-size:12px; color:#666;'>分数: </span><span style='font-size:14px; font-weight:bold; color:#2E7D32;'>{score_val}/9</span>", unsafe_allow_html=True)
-                                with col_d:
-                                    if comment and comment != '暂无评语':
-                                        st.caption(f"💬 {comment}")
-                                    if suggestion and suggestion != '暂无建议':
-                                        st.caption(f"💡 {suggestion}")
-
-                    # 3. 宗师总评
-                    st.markdown("---")
-                    st.markdown("**🍵 宗师总评：**")
-                    st.info(case.get('master_comment', '暂无'))
-
-                    # 4. 编辑按钮
-                    st.markdown("---")
-                    if st.button("✏️ 编辑此判例", key=f"edit_basic_{idx}", width='stretch'):
-                        st.session_state.editing_basic_idx = idx
-                        st.rerun()
+                    col_edit, col_del_single = st.columns(2)
+                    with col_edit:
+                        if st.button("✏️ 编辑", key=f"edit_basic_{idx}", width='stretch'):
+                            st.session_state.editing_basic_idx = idx
+                            st.rerun()
+                    with col_del_single:
+                        if st.button("🗑️ 删除", key=f"del_basic_{idx}", width='stretch'):
+                            _delete_basic_cases([idx])
+                            st.rerun()
 
     st.markdown("---")
 
-    # 显示已选数量和操作按钮
-    selected_count = sum(1 for v in st.session_state.basic_case_checkboxes.values() if v)
+    # 底部操作区
+    selected_indices = sorted([
+        idx for idx, checked in st.session_state.basic_case_checkboxes.items()
+        if checked
+    ])
+    selected_count = len(selected_indices)
     st.markdown(f"已选择: **{selected_count}** 条")
 
-    col_transfer, col_close = st.columns([1, 1])
+    col_transfer, col_del, col_close = st.columns([1, 1, 1])
 
     with col_transfer:
         if st.button("➡️ 转移到进阶判例", type="primary",
@@ -166,9 +180,32 @@ def show_basic_cases_dialog(embedder):
                      width='stretch'):
             _transfer_basic_to_supp(embedder)
 
+    with col_del:
+        if st.button("🗑️ 删除选中", type="secondary",
+                     disabled=selected_count == 0,
+                     width='stretch'):
+            _delete_basic_cases(selected_indices)
+            st.rerun()
+
     with col_close:
         if st.button("✅ 关闭", type="secondary", width='stretch'):
             st.rerun()
+
+
+def _delete_basic_cases(indices: list):
+    """删除指定索引的基础判例。"""
+    if not indices:
+        return
+    for idx in sorted(indices, reverse=True):
+        if idx < len(st.session_state.basic_cases):
+            st.session_state.basic_cases.pop(idx)
+    st.session_state.basic_cases = [
+        ResourceManager.strip_case_vector(c)
+        for c in st.session_state.basic_cases
+    ]
+    ResourceManager.save_json(st.session_state.basic_cases, PATHS.basic_case_data)
+    st.session_state.basic_case_checkboxes = {}
+    st.success(f"✅ 已删除 {len(indices)} 条基础判例")
 
 
 def _transfer_basic_to_supp(embedder):
@@ -322,7 +359,7 @@ def edit_basic_case_dialog(idx: int):
 
 @st.dialog("📋 进阶判例列表", width="large")
 def show_supp_cases_dialog(embedder):
-    """展示当前进阶判例列表 - 升级版（支持勾选转移到基础判例）"""
+    """展示当前进阶判例列表 - 优化版（分页 + 删除 + 转移）"""
     _, cases = st.session_state.supp_cases
 
     if not cases:
@@ -338,70 +375,84 @@ def show_supp_cases_dialog(embedder):
     if 'supp_case_checkboxes' not in st.session_state:
         st.session_state.supp_case_checkboxes = {}
 
-    st.markdown(f"**📊 共 {len(cases)} 条进阶判例**")
+    # 分页配置
+    PAGE_SIZE = 10
+    total = len(cases)
+    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+
+    if 'supp_dialog_page' not in st.session_state:
+        st.session_state.supp_dialog_page = 0
+    current_page = st.session_state.supp_dialog_page
+    current_page = min(current_page, total_pages - 1)
+
+    st.markdown(f"**📊 共 {total} 条进阶判例**")
+
+    # 分页导航
+    if total_pages > 1:
+        col_prev, col_info, col_next = st.columns([1, 2, 1])
+        with col_prev:
+            if st.button("⬅️ 上一页", disabled=current_page <= 0, key="supp_prev"):
+                st.session_state.supp_dialog_page = current_page - 1
+                st.rerun()
+        with col_info:
+            st.markdown(f"<div style='text-align:center; padding-top:6px;'>第 {current_page + 1}/{total_pages} 页</div>", unsafe_allow_html=True)
+        with col_next:
+            if st.button("下一页 ➡️", disabled=current_page >= total_pages - 1, key="supp_next"):
+                st.session_state.supp_dialog_page = current_page + 1
+                st.rerun()
+
     st.markdown("---")
 
-    for idx, case in enumerate(cases):
+    # 当前页数据
+    start = current_page * PAGE_SIZE
+    end = min(start + PAGE_SIZE, total)
+
+    for idx in range(start, end):
+        case = cases[idx]
         with st.container():
-            # 使用两列布局：左侧勾选框，右侧expander
-            col1, col2 = st.columns([0.05, 0.95])
-            with col1:
-                # 勾选框
+            col_chk, col_main = st.columns([0.05, 0.95])
+            with col_chk:
                 current_value = st.session_state.supp_case_checkboxes.get(idx, False)
                 checked = st.checkbox("", key=f"supp_check_{idx}",
                                      value=current_value,
                                      label_visibility="collapsed")
                 st.session_state.supp_case_checkboxes[idx] = checked
-            with col2:
-                with st.expander(f"📋 判例 {idx + 1}", expanded=False):
-                    # 1. 判例描述
-                    st.markdown("**📝 判例描述：**")
+            with col_main:
+                # 精简摘要视图
+                text_preview = (case.get('text', '') or '')[:100]
+                if len(case.get('text', '')) > 100:
+                    text_preview += "..."
+                scores = case.get('scores', {})
+                score_summary = " | ".join(
+                    f"{f}: {d.get('score', '-')}" for f, d in scores.items()
+                ) if scores else "暂无评分"
+
+                with st.expander(f"📋 判例 {idx + 1}　—　{text_preview[:30]}...", expanded=False):
                     st.markdown(f"> {case.get('text', '')}")
+                    st.caption(f"🏷️ {score_summary}")
+                    st.caption(f"🍵 总评：{(case.get('master_comment', '暂无') or '暂无')[:80]}")
 
-                    # 2. 六因子评分详情
-                    st.markdown("---")
-                    st.markdown("**🏷️ 因子评分详情：**")
-
-                    scores = case.get('scores', {})
-
-                    # 分两列展示因子
-                    fc1, fc2 = st.columns(2)
-
-                    for i, (factor, data) in enumerate(scores.items()):
-                        with (fc1 if i % 2 == 0 else fc2):
-                            with st.container(border=True):
-                                st.markdown(f"**{factor}**")
-                                score_val = data.get('score', '-')
-                                comment = data.get('comment', '暂无评语')
-                                suggestion = data.get('suggestion', '暂无建议')
-
-                                col_s, col_d = st.columns([1, 2])
-                                with col_s:
-                                    st.markdown(f"<span style='font-size:12px; color:#666;'>分数: </span><span style='font-size:14px; font-weight:bold; color:#2E7D32;'>{score_val}/9</span>", unsafe_allow_html=True)
-                                with col_d:
-                                    if comment and comment != '暂无评语':
-                                        st.caption(f"💬 {comment}")
-                                    if suggestion and suggestion != '暂无建议':
-                                        st.caption(f"💡 {suggestion}")
-
-                    # 3. 宗师总评
-                    st.markdown("---")
-                    st.markdown("**🍵 宗师总评：**")
-                    st.info(case.get('master_comment', '暂无'))
-
-                    # 4. 编辑按钮
-                    st.markdown("---")
-                    if st.button("✏️ 编辑此判例", key=f"edit_supp_{idx}", width='stretch'):
-                        st.session_state.editing_supp_idx = idx
-                        st.rerun()
+                    col_edit, col_del_single = st.columns(2)
+                    with col_edit:
+                        if st.button("✏️ 编辑", key=f"edit_supp_{idx}", width='stretch'):
+                            st.session_state.editing_supp_idx = idx
+                            st.rerun()
+                    with col_del_single:
+                        if st.button("🗑️ 删除", key=f"del_supp_{idx}", width='stretch'):
+                            _delete_supp_cases([idx], embedder)
+                            st.rerun()
 
     st.markdown("---")
 
-    # 显示已选数量和操作按钮
-    selected_count = sum(1 for v in st.session_state.supp_case_checkboxes.values() if v)
+    # 底部操作区
+    selected_indices = sorted([
+        idx for idx, checked in st.session_state.supp_case_checkboxes.items()
+        if checked
+    ])
+    selected_count = len(selected_indices)
     st.markdown(f"已选择: **{selected_count}** 条")
 
-    col_transfer, col_close = st.columns([1, 1])
+    col_transfer, col_del, col_close = st.columns([1, 1, 1])
 
     with col_transfer:
         if st.button("⬅️ 转移到基础判例", type="primary",
@@ -409,9 +460,33 @@ def show_supp_cases_dialog(embedder):
                      width='stretch'):
             _transfer_supp_to_basic(embedder)
 
+    with col_del:
+        if st.button("🗑️ 删除选中", type="secondary",
+                     disabled=selected_count == 0,
+                     width='stretch'):
+            _delete_supp_cases(selected_indices, embedder)
+            st.rerun()
+
     with col_close:
         if st.button("✅ 关闭", type="secondary", width='stretch'):
             st.rerun()
+
+
+def _delete_supp_cases(indices: list, embedder):
+    """删除指定索引的进阶判例并重建向量索引。"""
+    if not indices:
+        return
+    _, supp_data = st.session_state.supp_cases
+    for idx in sorted(indices, reverse=True):
+        if idx < len(supp_data):
+            supp_data.pop(idx)
+    try:
+        new_idx, supp_data = ResourceManager.sync_supp_cases(supp_data, embedder=embedder)
+        st.session_state.supp_cases = (new_idx, supp_data)
+        st.session_state.supp_case_checkboxes = {}
+        st.success(f"✅ 已删除 {len(indices)} 条进阶判例，并更新向量索引")
+    except Exception as e:
+        st.error(f"❌ 删除失败: {e}")
 
 
 def _transfer_supp_to_basic(embedder):
