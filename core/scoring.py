@@ -197,8 +197,8 @@ def _format_basic_cases(cases: List[Dict]) -> str:
 
     parts = []
     for i, case in enumerate(cases, 1):
-        text = case.get('text', '')[:200]
-        parts.append(f"[基础判例{i}] {text}...")
+        text = case.get('text', '')
+        parts.append(f"[基础判例{i}] {text}")
 
     return "\n\n".join(parts)
 
