@@ -225,6 +225,7 @@ def _render_auto_fill_section():
 def _render_training_section(manager_url: str, server_status: str):
     """渲染启动训练区域 - 升级版"""
     from config.settings import PATHS
+    from core.resource_manager import ResourceManager
 
     st.markdown("""
     <div style="padding: 12px; background: #FDF6ED; border-radius: 8px; margin-bottom: 10px; border-left: 4px solid #B8860B;">
