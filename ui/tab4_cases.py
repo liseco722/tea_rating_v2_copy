@@ -187,6 +187,7 @@ def _render_manual_add_form(case_type: str, embedder):
 
 def _render_batch_add_section(case_type: str):
     """渲染批量添加区域 - 升级版"""
+    from config.settings import PATHS
     st.caption("📋 请按照模板格式填写判例数据")
 
     # 文件上传
