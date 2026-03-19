@@ -214,23 +214,9 @@ def _render_manual_add_form(case_type: str, embedder):
         if submitted:
             _save_case(f_txt, input_scores, f_master, case_type, embedder)
 
-
-def _get_template_path():
-    """获取模板文件路径（兼容本地开发和 Streamlit Cloud）"""
-    # 优先使用项目根目录下的相对路径
-    candidates = [
-        Path(__file__).parent.parent / "tea_backup" / "template.xlsx",  # 从 ui/ 目录向上
-        Path("tea_backup") / "template.xlsx",                           # 从项目根目录
-        Path(__file__).parent / "tea_backup" / "template.xlsx",         # 与当前文件同级
-    ]
-    for p in candidates:
-        if p.exists():
-            return p
-    return None
-
-
 def _render_batch_add_section(case_type: str):
     """渲染批量添加区域 - 升级版"""
+    from config.settings import Paths
     st.caption("📋 请按照模板格式填写判例数据")
 
     # 文件上传
@@ -242,7 +228,7 @@ def _render_batch_add_section(case_type: str):
     )
 
     # 下载模板按钮 - 使用相对路径
-    template_path = _get_template_path()
+    template_path = Paths.template_file
     if template_path:
         with open(template_path, 'rb') as f:
             template_data = f.read()
