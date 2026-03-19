@@ -6,11 +6,54 @@ dialogs.py
 
 import streamlit as st
 import time
+import logging
 import numpy as np
 import faiss
 from config.constants import TEA_EXAMPLES, FACTORS
 from config.settings import PATHS
 from core.resource_manager import ResourceManager
+from core.github_sync import GithubSync
+
+logger = logging.getLogger(__name__)
+
+
+# ==========================================
+# GitHub 同步辅助函数
+# ==========================================
+
+def _sync_basic_to_github():
+    """同步基础判例 JSON 到 GitHub（静默失败）。"""
+    try:
+        GithubSync.sync_basic_cases(st.session_state.basic_cases)
+        logger.info("已同步 basic_case.json 到 GitHub")
+    except Exception as e:
+        logger.warning(f"同步基础判例到 GitHub 失败: {e}")
+
+
+def _sync_supp_to_github(supp_data):
+    """同步进阶判例 JSON + FAISS index 到 GitHub（静默失败）。"""
+    try:
+        # 1. 推送 supplementary_case.json（去除 _embedding 字段）
+        clean_data = [ResourceManager.strip_case_vector(c) for c in supp_data]
+        GithubSync.sync_supp_cases(clean_data)
+        logger.info("已同步 supplementary_case.json 到 GitHub")
+    except Exception as e:
+        logger.warning(f"同步进阶判例 JSON 到 GitHub 失败: {e}")
+
+    try:
+        # 2. 推送 supp_cases.index（FAISS 二进制索引）
+        tea_data_dir = PATHS.basic_case_data.parent
+        index_path = tea_data_dir / "supp_cases.index"
+        if index_path.exists():
+            with open(index_path, 'rb') as f:
+                content = f.read()
+            GithubSync.push_binary_file(
+                "tea_data/supp_cases.index", content,
+                "Update supp_cases.index"
+            )
+            logger.info("已同步 supp_cases.index 到 GitHub")
+    except Exception as e:
+        logger.warning(f"同步进阶判例 index 到 GitHub 失败: {e}")
 
 
 # ==========================================
@@ -205,6 +248,7 @@ def _delete_basic_cases(indices: list):
         for c in st.session_state.basic_cases
     ]
     ResourceManager.save_json(st.session_state.basic_cases, PATHS.basic_case_data)
+    _sync_basic_to_github()
     st.session_state.basic_case_checkboxes = {}
     st.success(f"✅ 已删除 {len(indices)} 条基础判例")
 
@@ -233,6 +277,7 @@ def _transfer_basic_to_supp(embedder):
             for case in st.session_state.basic_cases
         ]
         ResourceManager.save_json(st.session_state.basic_cases, PATHS.basic_case_data)
+        _sync_basic_to_github()
 
         # 再追加到进阶判例并更新索引
         _, supp_data = st.session_state.supp_cases
@@ -242,6 +287,7 @@ def _transfer_basic_to_supp(embedder):
 
         new_idx, supp_data = ResourceManager.sync_supp_cases(supp_data, embedder=embedder)
         st.session_state.supp_cases = (new_idx, supp_data)
+        _sync_supp_to_github(supp_data)
         st.session_state.basic_case_checkboxes = {}
 
         st.success(f"✅ 已成功转移 {len(selected_cases)} 条到进阶判例！")
@@ -343,6 +389,7 @@ def edit_basic_case_dialog(idx: int):
                 cases[idx] = ResourceManager.strip_case_vector(cases[idx])
                 st.session_state.basic_cases = cases
                 ResourceManager.save_json(st.session_state.basic_cases, PATHS.basic_case_data)
+                _sync_basic_to_github()
                 st.session_state.editing_basic_idx = None
                 st.success("✅ 已保存修改！")
                 time.sleep(0.3)
@@ -485,6 +532,7 @@ def _delete_supp_cases(indices: list, embedder):
     try:
         new_idx, supp_data = ResourceManager.sync_supp_cases(supp_data, embedder=embedder)
         st.session_state.supp_cases = (new_idx, supp_data)
+        _sync_supp_to_github(supp_data)
         st.session_state.supp_case_checkboxes = {}
         st.success(f"✅ 已删除 {len(indices)} 条进阶判例，并更新向量索引")
     except Exception as e:
@@ -512,9 +560,11 @@ def _transfer_supp_to_basic(embedder):
     try:
         st.session_state.basic_cases.extend(selected_cases)
         ResourceManager.save_json(st.session_state.basic_cases, PATHS.basic_case_data)
+        _sync_basic_to_github()
 
         new_idx, supp_data = ResourceManager.sync_supp_cases(supp_data, embedder=embedder)
         st.session_state.supp_cases = (new_idx, supp_data)
+        _sync_supp_to_github(supp_data)
         st.session_state.supp_case_checkboxes = {}
 
         st.success(f"✅ 已成功转移 {len(selected_cases)} 条到基础判例！")
@@ -617,6 +667,7 @@ def edit_supp_case_dialog(idx: int, embedder):
                     cases[idx] = updated_case
                     new_idx, cases = ResourceManager.sync_supp_cases(cases, embedder=embedder)
                     st.session_state.supp_cases = (new_idx, cases)
+                    _sync_supp_to_github(cases)
                     st.session_state.editing_supp_idx = None
                     st.success("✅ 已保存修改，并刷新进阶判例索引！")
                     time.sleep(0.3)
