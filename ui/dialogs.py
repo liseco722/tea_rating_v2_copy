@@ -108,18 +108,19 @@ def show_basic_cases_dialog(embedder):
     st.markdown(f"**📊 共 {total} 条基础判例**")
 
     # 分页导航
+    def _set_page(key, page):
+        st.session_state[key] = page
+
     if total_pages > 1:
         col_prev, col_info, col_next = st.columns([1, 2, 1])
         with col_prev:
-            if st.button("⬅️ 上一页", disabled=current_page <= 0, key="basic_prev"):
-                st.session_state.basic_dialog_page = current_page - 1
-                st.rerun()
+            st.button("⬅️ 上一页", disabled=current_page <= 0, key="basic_prev",
+                      on_click=_set_page, args=('basic_dialog_page', current_page - 1))
         with col_info:
             st.markdown(f"<div style='text-align:center; padding-top:6px;'>第 {current_page + 1}/{total_pages} 页</div>", unsafe_allow_html=True)
         with col_next:
-            if st.button("下一页 ➡️", disabled=current_page >= total_pages - 1, key="basic_next"):
-                st.session_state.basic_dialog_page = current_page + 1
-                st.rerun()
+            st.button("下一页 ➡️", disabled=current_page >= total_pages - 1, key="basic_next",
+                      on_click=_set_page, args=('basic_dialog_page', current_page + 1))
 
     st.markdown("---")
 
@@ -388,18 +389,19 @@ def show_supp_cases_dialog(embedder):
     st.markdown(f"**📊 共 {total} 条进阶判例**")
 
     # 分页导航
+    def _set_page(key, page):
+        st.session_state[key] = page
+
     if total_pages > 1:
         col_prev, col_info, col_next = st.columns([1, 2, 1])
         with col_prev:
-            if st.button("⬅️ 上一页", disabled=current_page <= 0, key="supp_prev"):
-                st.session_state.supp_dialog_page = current_page - 1
-                st.rerun()
+            st.button("⬅️ 上一页", disabled=current_page <= 0, key="supp_prev",
+                      on_click=_set_page, args=('supp_dialog_page', current_page - 1))
         with col_info:
             st.markdown(f"<div style='text-align:center; padding-top:6px;'>第 {current_page + 1}/{total_pages} 页</div>", unsafe_allow_html=True)
         with col_next:
-            if st.button("下一页 ➡️", disabled=current_page >= total_pages - 1, key="supp_next"):
-                st.session_state.supp_dialog_page = current_page + 1
-                st.rerun()
+            st.button("下一页 ➡️", disabled=current_page >= total_pages - 1, key="supp_next",
+                      on_click=_set_page, args=('supp_dialog_page', current_page + 1))
 
     st.markdown("---")
 
