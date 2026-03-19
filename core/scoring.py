@@ -181,10 +181,10 @@ def _format_cases_for_prompt(cases: List[Dict]) -> str:
 
     parts = []
     for i, case in enumerate(cases, 1):
-        text = case.get('text', '')[:200]
+        text = case.get('text', '')
         scores = case.get('scores', {})
         score_str = ", ".join([f"{k}:{v.get('score', 0)}" for k, v in scores.items()])
-        parts.append(f"[判例{i}] {text}...\n得分: {score_str}")
+        parts.append(f"[判例{i}] {text}\n得分: {score_str}")
 
     return "\n\n".join(parts)
 
@@ -198,7 +198,9 @@ def _format_basic_cases(cases: List[Dict]) -> str:
     parts = []
     for i, case in enumerate(cases, 1):
         text = case.get('text', '')
-        parts.append(f"[基础判例{i}] {text}")
+        scores = case.get('scores', {})
+        score_str = ", ".join([f"{k}:{v.get('score', 0)}" for k, v in scores.items()])
+        parts.append(f"[基础判例{i}] {text}\n得分: {score_str}")
 
     return "\n\n".join(parts)
 
