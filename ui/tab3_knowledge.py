@@ -305,8 +305,36 @@ def _parse_file_to_block(file_path: Path) -> Dict:
 
 
 
+def _to_github_path(local_path: Path) -> str:
+    """将本地 Path 转换为 GitHub 仓库路径，如 'tea_data/xxx'。"""
+    s = str(local_path).replace('\\', '/')
+    idx = s.find('tea_data/')
+    if idx >= 0:
+        return s[idx:]
+    return f"tea_data/{local_path.name}"
+
+
+def _push_local_file_to_github(local_path: Path, commit_msg: str = None):
+    """将本地文件推送到 GitHub 对应路径（静默失败，仅记录日志）。"""
+    if not local_path.exists():
+        return
+    try:
+        github_path = _to_github_path(local_path)
+        if commit_msg is None:
+            commit_msg = f"Update {github_path}"
+        with open(local_path, 'rb') as f:
+            content = f.read()
+        ok = GithubSync.push_binary_file(github_path, content, commit_msg)
+        if ok:
+            logger.info(f"已同步 {github_path} 到 GitHub")
+        else:
+            logger.warning(f"同步 {github_path} 到 GitHub 失败")
+    except Exception as e:
+        logger.warning(f"推送 {local_path.name} 到 GitHub 异常: {e}")
+
+
 def _save_kb_state(chunks: List[str], vectors: List[List[float]], metadata: Dict):
-    """保存 KB 缓存并刷新 session_state。"""
+    """保存 KB 缓存并刷新 session_state，同时同步 index 到 GitHub。"""
     ResourceManager.save_kb_metadata(metadata)
     ResourceManager.save_kb_vectors(vectors)
     ResourceManager.save_kb_files(list(metadata.get('files', {}).keys()))
@@ -319,13 +347,21 @@ def _save_kb_state(chunks: List[str], vectors: List[List[float]], metadata: Dict
     st.session_state.rag_loading_status = 'complete'
     st.session_state.rag_loading_needed = False
 
+    # 同步关键文件到 GitHub tea_data/
+    for path in [PATHS.kb_index, PATHS.kb_chunks, PATHS.kb_metadata, PATHS.kb_files]:
+        _push_local_file_to_github(path, f"Update KB: {path.name}")
+
 
 
 def _clear_kb_state():
     for path in [PATHS.kb_index, PATHS.kb_chunks, PATHS.kb_metadata, PATHS.kb_vectors, PATHS.kb_files]:
         try:
+            # 删本地
             if path.exists():
                 path.unlink()
+            # 删 GitHub
+            github_path = _to_github_path(path)
+            GithubSync.delete_file(github_path, f"Delete KB: {path.name}")
         except Exception as e:
             logger.warning(f"删除缓存文件失败 ({path}): {e}")
 
