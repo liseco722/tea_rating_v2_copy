@@ -15,6 +15,7 @@ import streamlit as st
 
 from config.settings import PATHS
 from core.resource_manager import ResourceManager, DEFAULT_EMBEDDING_DIM
+from core.github_sync import GithubSync
 
 logger = logging.getLogger(__name__)
 
@@ -481,15 +482,24 @@ def _render_local_file_list():
             with col3:
                 if st.button("🗑️", key=f"del_local_{idx}", help="删除文件"):
                     try:
+                        # 1. 删除本地文件
                         if file_info['path'].exists():
                             os.remove(file_info['path'])
+
+                        # 2. 从 GitHub tea_data/RAG 删除
+                        gh_deleted = GithubSync.delete_rag_file(file_info['name'])
+                        if not gh_deleted:
+                            logger.warning(f"GitHub 删除 {file_info['name']} 失败或未配置")
+
+                        # 3. 删除对应 chunks 并更新 index
                         ok, msg = _remove_file_from_kb(file_info['name'])
                         if not ok:
                             st.error(f"❌ 删除后更新索引失败: {msg}")
                             return
 
                         st.session_state.refresh_local_files = True
-                        st.success(f"✅ 已删除 {file_info['name']}，并更新对应 chunks / index")
+                        gh_msg = "，已同步删除 GitHub 端文件" if gh_deleted else ""
+                        st.success(f"✅ 已删除 {file_info['name']}，并更新对应 chunks / index{gh_msg}")
                         st.rerun()
                     except Exception as e:
                         st.error(f"❌ 删除失败: {str(e)}")
@@ -556,20 +566,45 @@ def _render_safety_rebuild_section():
 # ==========================================
 
 def _handle_upload(files):
-    """处理文件上传：保存 + 备份 + 增量 embedding + 刷新 index。"""
+    """处理文件上传：保存本地 + 推送 GitHub + 备份 + 增量 embedding + 刷新 index。"""
     with st.spinner("🔄 正在处理文件，请稍候..."):
         try:
             os.makedirs(PATHS.RAG_DIR, exist_ok=True)
             os.makedirs(PATHS.BACKUP_DIR, exist_ok=True)
 
             saved_paths: List[Path] = []
+            github_uploaded: List[str] = []
+            github_backed_up: List[str] = []
+
             for uploaded_file in files:
+                # 1. 保存到本地 tea_data/RAG
                 file_path = PATHS.RAG_DIR / uploaded_file.name
+                uploaded_file.seek(0)
+                file_content = uploaded_file.read()
                 with open(file_path, 'wb') as f:
-                    f.write(uploaded_file.getbuffer())
+                    f.write(file_content)
                 saved_paths.append(file_path)
 
+                # 2. 推送到 GitHub tea_data/RAG
+                if GithubSync.push_binary_file(
+                    f"tea_data/RAG/{uploaded_file.name}",
+                    file_content,
+                    f"Add RAG file: {uploaded_file.name}"
+                ):
+                    github_uploaded.append(uploaded_file.name)
+                else:
+                    logger.warning(f"GitHub 上传 {uploaded_file.name} 到 tea_data/RAG 失败")
+
+                # 3. 推送到 GitHub tea_backup（备份）
+                if GithubSync.backup_rag_file(file_content, uploaded_file.name):
+                    github_backed_up.append(uploaded_file.name)
+                else:
+                    logger.warning(f"GitHub 备份 {uploaded_file.name} 到 tea_backup 失败")
+
+            # 4. 本地备份
             backed_up = _backup_files(saved_paths)
+
+            # 5. 增量 embedding + 更新 index
             ok, result = _upsert_files_into_kb(saved_paths)
             if not ok:
                 st.error(f"❌ 更新知识库索引失败: {result}")
@@ -584,6 +619,10 @@ def _handle_upload(files):
 
     st.success(f"✅ 成功添加 {len(saved_paths)} 个文件到知识库")
     st.success(f"📊 索引已更新，本次新增 / 替换共影响 {result} 个知识片段")
+    if github_uploaded:
+        st.info(f"☁️ 已同步到 GitHub tea_data/RAG：{', '.join(github_uploaded)}")
+    if github_backed_up:
+        st.info(f"💾 已备份到 GitHub tea_backup：{', '.join(github_backed_up)}")
     if backed_up:
-        st.info(f"💾 已同步备份到 tea_data/RAG_backup：{', '.join(backed_up)}")
+        st.info(f"📂 已本地备份到 RAG_backup：{', '.join(backed_up)}")
     st.rerun()
