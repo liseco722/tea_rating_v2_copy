@@ -54,6 +54,8 @@ def render_tab1(embedder, client, client_d, model_id):
             st.session_state.last_llm_user_prompt = ""
         if 'score_version' not in st.session_state:
             st.session_state.score_version = 0
+        if 'last_scored_input' not in st.session_state:
+            st.session_state.last_scored_input = ""
 
         # 评分按钮 - 与输入框宽度一致
         # 自定义按钮颜色
@@ -85,7 +87,8 @@ def render_tab1(embedder, client, client_d, model_id):
         # 评分结果展示
         if st.session_state.last_scores:
             st.markdown("---")
-            _render_scoring_results(user_input, embedder)
+            scored_input = st.session_state.get('last_scored_input', user_input)
+            _render_scoring_results(scored_input, embedder)
 
 
 def _handle_scoring(user_input, embedder, client, client_d, model_id, r_num, c_num):
@@ -227,13 +230,14 @@ def _handle_scoring(user_input, embedder, client, client_d, model_id, r_num, c_n
 
     st.session_state.last_llm_sys_prompt = sent_sys_p
     st.session_state.last_llm_user_prompt = sent_user_p
+    st.session_state.last_scored_input = user_input
 
     actual_scores = scores.get('scores', scores) if isinstance(scores, dict) else scores
     master_comment = scores.get("master_comment", "")
     st.session_state.last_master_comment = master_comment
     st.session_state.last_actual_scores = actual_scores
 
-    # ===== 修复：每次评分完成后递增 score_version，使校准区域刷新显示最新结果 =====
+    # 关键修复：每次重新评分后都刷新校准区 widget key，避免校准区沿用旧值
     st.session_state.score_version += 1
 
 
@@ -400,102 +404,37 @@ def _render_calibration_ui(user_input, embedder, s, mc):
 
 
 def _save_calibrated_score(user_input, cal_scores, cal_master, embedder):
-    """保存校准后的评分"""
+    """保存校准后的评分。
+
+    新逻辑：
+    1. 只对当前新增判例做 embedding。
+    2. 其余进阶判例直接复用 supplementary_case.json 中缓存的 _embedding。
+    3. 索引统一按缓存向量重建，不再因为删除/迁移而重新调用全部 embedding。
+    """
     import time
-    import numpy as np
-    import faiss
-    from config.settings import PATHS
     from core.resource_manager import ResourceManager
 
     nc = {
         "text": user_input,
         "scores": cal_scores,
         "master_comment": cal_master,
-        "created_at": time.strftime("%Y-%m-%d")
+        "created_at": time.strftime("%Y-%m-%d %H:%M:%S")
     }
 
-    # 保存到进阶判例
-    supp_idx, supp_data = st.session_state.supp_cases
+    try:
+        ResourceManager.ensure_case_embedding(nc, embedder)
 
-    # 编码文本为嵌入向量
-    embedding = embedder.encode([user_input])
-
-    # 确保嵌入向量是 numpy 数组并且是二维的
-    if not isinstance(embedding, np.ndarray):
-        embedding = np.array(embedding)
-
-    # 如果是一维数组，转换为二维
-    if len(embedding.shape) == 1:
-        embedding = embedding.reshape(1, -1)
-
-    # 检查维度是否匹配
-    if embedding.shape[1] != supp_idx.d:
-        st.warning(f"⚠️ 嵌入向量维度不匹配，重新创建索引")
-
-        # 重新创建索引
-        new_dim = embedding.shape[1]
-
-        # 如果有现有数据，重新编码所有数据
-        if len(supp_data) > 0:
-            all_texts = [item["text"] for item in supp_data] + [user_input]
-            all_embeddings = embedder.encode(all_texts)
-
-            if not isinstance(all_embeddings, np.ndarray):
-                all_embeddings = np.array(all_embeddings)
-
-            # 创建新的索引
-            new_idx = faiss.IndexFlatL2(new_dim)
-            new_idx.add(all_embeddings.astype('float32'))
-
-            # 添加新数据
-            supp_data.append(nc)
-
-            # 更新 session_state
-            st.session_state.supp_cases = (new_idx, supp_data)
-
-            # 保存到文件
-            ResourceManager.save(
-                new_idx,
-                supp_data,
-                PATHS.supp_case_index,
-                PATHS.supp_case_data,
-                is_json=True
-            )
-        else:
-            # 如果没有现有数据，直接创建新索引
-            new_idx = faiss.IndexFlatL2(new_dim)
-            new_idx.add(embedding.astype('float32'))
-            supp_data.append(nc)
-            st.session_state.supp_cases = (new_idx, supp_data)
-
-            # 保存到文件
-            ResourceManager.save(
-                new_idx,
-                supp_data,
-                PATHS.supp_case_index,
-                PATHS.supp_case_data,
-                is_json=True
-            )
-    else:
-        # 维度匹配，直接添加
+        _, supp_data = st.session_state.supp_cases
         supp_data.append(nc)
-        supp_idx.add(embedding.astype('float32'))
-        st.session_state.supp_cases = (supp_idx, supp_data)
+        new_idx, supp_data = ResourceManager.sync_supp_cases(supp_data, embedder=embedder)
+        st.session_state.supp_cases = (new_idx, supp_data)
 
-        # 保存到文件
-        ResourceManager.save(
-            supp_idx,
-            supp_data,
-            PATHS.supp_case_index,
-            PATHS.supp_case_data,
-            is_json=True
-        )
-
-    st.success("✅ 校准已保存到进阶判例")
-    st.session_state.score_version += 1
-    time.sleep(0.5)
-
-
+        st.success("✅ 校准已保存到进阶判例")
+        st.session_state.score_version += 1
+        time.sleep(0.3)
+        st.rerun()
+    except Exception as e:
+        st.error(f"❌ 保存校准评分失败: {e}")
 
 
 @st.dialog("📝 本次发送给 LLM 的完整 Prompt", width="large")
@@ -513,3 +452,4 @@ def _show_prompt_dialog():
     st.markdown("#### 👤 User Prompt（用户提示词）")
     user_prompt = st.session_state.get('last_llm_user_prompt', '(暂无)')
     st.code(user_prompt, language=None, height=400)
+
