@@ -9,6 +9,7 @@ main.py
 import sys
 import os
 import logging
+import json
 
 # 确保项目根目录在 Python 路径中
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -23,9 +24,6 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 import streamlit as st
-import json
-import time
-import pickle
 
 # ==========================================
 # 导入模块
@@ -36,7 +34,7 @@ from config.settings import apply_page_config, apply_css_styles, PATHS
 from config.constants import DEFAULT_USER_TEMPLATE
 
 # 核心模块
-from core.resource_manager import ResourceManager
+from core.resource_manager import ResourceManager, DEFAULT_EMBEDDING_DIM
 from core import bootstrap_cases
 
 # UI 模块
@@ -53,6 +51,83 @@ from ui.tab3_knowledge import render_tab3
 from ui.tab4_cases import render_tab4
 from ui.tab5_finetune import render_tab5
 from ui.tab6_prompts import render_tab6
+
+
+# ==========================================
+# 辅助函数
+# ==========================================
+
+def _list_local_rag_files():
+    """列出本地 RAG 文件。"""
+    if not PATHS.RAG_DIR.exists():
+        return []
+    return [
+        f for f in PATHS.RAG_DIR.iterdir()
+        if f.is_file() and f.suffix.lower() in {".pdf", ".txt", ".docx"}
+    ]
+
+
+def _load_cached_kb():
+    """尽量从本地缓存加载知识库；失败时返回空知识库。"""
+    try:
+        if PATHS.kb_index.exists() and PATHS.kb_chunks.exists():
+            return ResourceManager.load(PATHS.kb_index, PATHS.kb_chunks)
+    except Exception as e:
+        logger.warning(f"知识库缓存加载失败，将使用空知识库: {e}")
+    return ResourceManager.empty_faiss_index(), []
+
+
+
+def _ensure_supp_case_index(embedder):
+    """确保 supplementary_case.json 与 supp_cases.index 一致。
+
+    触发条件：
+    1. supplementary_case.json 存在但 index 缺失
+    2. index 维度不是当前 embedding 维度（768）
+    3. index 向量数量与判例数量不一致
+    4. 判例缺少缓存 embedding（首次迁移旧数据）
+    """
+    supp_idx, supp_data = st.session_state.get(
+        'supp_cases',
+        (ResourceManager.empty_faiss_index(DEFAULT_EMBEDDING_DIM), [])
+    )
+
+    if not supp_data:
+        st.session_state.supp_cases = (
+            ResourceManager.empty_faiss_index(DEFAULT_EMBEDDING_DIM),
+            []
+        )
+        return False
+
+    idx_dim = getattr(supp_idx, 'd', DEFAULT_EMBEDDING_DIM)
+    idx_count = getattr(supp_idx, 'ntotal', 0)
+    idx_missing = not PATHS.supp_case_index.exists()
+
+    missing_cached_embedding = any(
+        ResourceManager._normalize_vector(case.get("_embedding"), DEFAULT_EMBEDDING_DIM) is None
+        for case in supp_data
+    )
+
+    needs_rebuild = (
+        idx_missing
+        or idx_dim != DEFAULT_EMBEDDING_DIM
+        or idx_count != len(supp_data)
+        or missing_cached_embedding
+    )
+
+    if not needs_rebuild:
+        return False
+
+    with st.spinner("🔄 正在校验进阶判例索引..."):
+        new_idx, synced_cases = ResourceManager.sync_supp_cases(supp_data, embedder=embedder)
+
+    st.session_state.supp_cases = (new_idx, synced_cases)
+    logger.info(
+        "进阶判例索引已重建：count=%s, dim=%s",
+        len(synced_cases),
+        getattr(new_idx, 'd', DEFAULT_EMBEDDING_DIM)
+    )
+    return True
 
 
 # ==========================================
@@ -74,60 +149,41 @@ if 'loaded' not in st.session_state:
 
     # 1. 加载知识库缓存
     logger.info("步骤 1/5: 加载知识库缓存...")
-    try:
-        kb_idx, kb_data = ResourceManager.load(PATHS.kb_index, PATHS.kb_chunks)
-        st.session_state.kb = (kb_idx, kb_data)
-        st.session_state.kb_files = ResourceManager.load_kb_files()
-    except:
-        st.session_state.kb = (None, [])
-        st.session_state.kb_files = []
-        kb_data = []
-    logger.info(f"  → 知识库: {len(st.session_state.kb[1])} 个片段")
+    kb_idx, kb_data = _load_cached_kb()
+    st.session_state.kb = (kb_idx, kb_data)
+    st.session_state.kb_files = ResourceManager.load_kb_files()
+    logger.info(f"  → 知识库: {len(kb_data)} 个片段")
 
     # 2. 加载判例库（基础 + 进阶）
     logger.info("步骤 2/5: 加载判例库...")
-    st.session_state.basic_cases = ResourceManager.load_external_json(PATHS.basic_case_data, fallback=[])
+    basic_cases_raw = ResourceManager.load_external_json(PATHS.basic_case_data, fallback=[])
+    basic_cases = [ResourceManager.strip_case_vector(case) for case in basic_cases_raw]
+    if basic_cases != basic_cases_raw:
+        ResourceManager.save_json(basic_cases, PATHS.basic_case_data)
 
-    # ===== 修复：从正确的 supp_case_data 路径加载进阶判例 =====
     supp_data = ResourceManager.load_external_json(PATHS.supp_case_data, fallback=[])
+    supp_idx = ResourceManager.load_index(PATHS.supp_case_index, DEFAULT_EMBEDDING_DIM)
 
-    # 尝试加载进阶判例的 FAISS 索引
-    if PATHS.supp_case_index.exists():
-        try:
-            import faiss
-            supp_idx = faiss.read_index(str(PATHS.supp_case_index))
-            logger.info(f"  → 进阶判例索引已加载，维度={supp_idx.d}，向量数={supp_idx.ntotal}")
-        except Exception as e:
-            logger.warning(f"  ⚠️ 进阶判例索引加载失败: {e}")
-            import faiss
-            supp_idx = faiss.IndexFlatL2(768)
-    else:
-        import faiss
-        supp_idx = faiss.IndexFlatL2(768)
-        logger.info("  → 进阶判例索引不存在，使用空索引")
-
-    # ===== 标记：如果有 supp_data 但索引为空或不存在，稍后需要重建 =====
-    if len(supp_data) > 0 and (supp_idx.ntotal == 0 or supp_idx.ntotal != len(supp_data)):
-        st.session_state.supp_index_needs_rebuild = True
-        logger.info(f"  ⚠️ 进阶判例数据 {len(supp_data)} 条，索引向量 {supp_idx.ntotal} 条，需要重建索引")
-    else:
-        st.session_state.supp_index_needs_rebuild = False
-
+    st.session_state.basic_cases = basic_cases
     st.session_state.supp_cases = (supp_idx, supp_data)
-    logger.info(f"  → 基础判例: {len(st.session_state.basic_cases)} 条")
+    logger.info(f"  → 基础判例: {len(basic_cases)} 条")
     logger.info(f"  → 进阶判例: {len(supp_data)} 条")
 
-    # 3. RAG 延迟加载标记
+    # 3. RAG 延迟加载状态
     logger.info("步骤 3/5: 检查 RAG 状态...")
-    kb_data = st.session_state.kb[1]
-    if not kb_data or len(kb_data) == 0:
-        st.session_state.rag_loading_needed = True
-        st.session_state.rag_loading_status = "pending"
-        logger.info("  ⚠️ 本地知识库为空，将在侧边栏加载")
-    else:
+    local_rag_files = _list_local_rag_files()
+    if len(kb_data) > 0:
         st.session_state.rag_loading_needed = False
         st.session_state.rag_loading_status = "complete"
         logger.info(f"  ✅ 已加载 {len(kb_data)} 个知识片段")
+    elif local_rag_files:
+        st.session_state.rag_loading_needed = False
+        st.session_state.rag_loading_status = "cache_missing"
+        logger.info(f"  ⚠️ 本地有 {len(local_rag_files)} 个 RAG 文件，但缓存索引缺失或未加载")
+    else:
+        st.session_state.rag_loading_needed = False
+        st.session_state.rag_loading_status = "empty"
+        logger.info("  ℹ️ 当前尚无本地知识库文件")
 
     # 4. 加载 Prompt 配置
     logger.info("步骤 4/5: 加载 Prompt 配置...")
@@ -174,37 +230,8 @@ if 'cases_bootstrapped' not in st.session_state:
     bootstrap_cases(embedder)
     st.session_state.cases_bootstrapped = True
 
-# ===== 自动重建进阶判例索引（在 embedder 可用后执行） =====
-if st.session_state.get('supp_index_needs_rebuild', False) and embedder:
-    import faiss
-    import numpy as np
-
-    supp_idx, supp_data = st.session_state.supp_cases
-    if len(supp_data) > 0:
-        try:
-            with st.spinner("🔄 正在重建进阶判例索引..."):
-                all_texts = [item.get("text", "") for item in supp_data]
-                all_embeddings = embedder.encode(all_texts)
-
-                if not isinstance(all_embeddings, np.ndarray):
-                    all_embeddings = np.array(all_embeddings, dtype=np.float32)
-
-                new_idx = faiss.IndexFlatL2(all_embeddings.shape[1])
-                new_idx.add(all_embeddings.astype('float32'))
-
-                st.session_state.supp_cases = (new_idx, supp_data)
-
-                # 持久化
-                ResourceManager.save(
-                    new_idx, supp_data,
-                    PATHS.supp_case_index, PATHS.supp_case_data,
-                    is_json=True
-                )
-                logger.info(f"✅ 进阶判例索引已重建: {new_idx.ntotal} 条向量，维度={new_idx.d}")
-        except Exception as e:
-            logger.error(f"❌ 进阶判例索引重建失败: {e}")
-
-    st.session_state.supp_index_needs_rebuild = False
+# 统一校验一次进阶判例索引
+_ensure_supp_case_index(embedder)
 
 
 # ==========================================
@@ -219,7 +246,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Tab 定义 (更简洁的标签)
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["交互评分", "批量评分", "知识库","判例库", "模型微调", "Prompt配置"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["交互评分", "批量评分", "知识库", "判例库", "模型微调", "Prompt配置"])
 
 # ==========================================
 # 渲染各 Tab
