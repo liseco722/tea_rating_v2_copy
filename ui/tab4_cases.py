@@ -13,8 +13,38 @@ from pathlib import Path
 from config.constants import FACTORS
 from config.settings import PATHS
 from core.resource_manager import ResourceManager
+from core.github_sync import GithubSync
 
 logger = logging.getLogger(__name__)
+
+
+def _sync_basic_to_github():
+    """同步基础判例 JSON 到 GitHub（静默失败）。"""
+    try:
+        GithubSync.sync_basic_cases(st.session_state.basic_cases)
+    except Exception as e:
+        logger.warning(f"同步基础判例到 GitHub 失败: {e}")
+
+
+def _sync_supp_to_github(supp_data):
+    """同步进阶判例 JSON + FAISS index 到 GitHub（静默失败）。"""
+    try:
+        clean_data = [ResourceManager.strip_case_vector(c) for c in supp_data]
+        GithubSync.sync_supp_cases(clean_data)
+    except Exception as e:
+        logger.warning(f"同步进阶判例 JSON 到 GitHub 失败: {e}")
+    try:
+        tea_data_dir = PATHS.basic_case_data.parent
+        index_path = tea_data_dir / "supp_cases.index"
+        if index_path.exists():
+            with open(index_path, 'rb') as f:
+                content = f.read()
+            GithubSync.push_binary_file(
+                "tea_data/supp_cases.index", content,
+                "Update supp_cases.index"
+            )
+    except Exception as e:
+        logger.warning(f"同步进阶判例 index 到 GitHub 失败: {e}")
 
 
 def render_tab4(embedder):
@@ -253,6 +283,7 @@ def _save_case(text, scores, master_comment, case_type, embedder):
             clean_case = ResourceManager.strip_case_vector(new_c)
             st.session_state.basic_cases.append(clean_case)
             ResourceManager.save_json(st.session_state.basic_cases, PATHS.basic_case_data)
+            _sync_basic_to_github()
             st.success("✅ 已保存基础判例！")
         else:
             ResourceManager.ensure_case_embedding(new_c, embedder)
@@ -260,6 +291,7 @@ def _save_case(text, scores, master_comment, case_type, embedder):
             supp_data.append(new_c)
             new_idx, supp_data = ResourceManager.sync_supp_cases(supp_data, embedder=embedder)
             st.session_state.supp_cases = (new_idx, supp_data)
+            _sync_supp_to_github(supp_data)
             st.success("✅ 已保存进阶判例，并更新向量索引！")
 
         st.balloons()
