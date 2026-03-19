@@ -287,7 +287,7 @@ def _render_training_section(manager_url: str, server_status: str):
                 with open(PATHS.training_file, "rb") as f:
                     with st.spinner("正在上传数据并启动训练任务..."):
                         files = {'file': ('tea_feedback.jsonl', f, 'application/json')}
-                        r = requests.post(f"{MANAGER_URL}/upload_and_train", files=files, timeout=100)
+                        r = requests.post(f"{manager_url}/upload_and_train", files=files, timeout=100)
                     if r.status_code == 200:
                         st.balloons()
                         st.success(f"✅ 任务已提交！服务器响应: {r.json().get('message')}")
