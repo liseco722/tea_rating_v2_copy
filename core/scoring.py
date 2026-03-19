@@ -7,7 +7,6 @@ scoring.py
 import json
 import time
 import logging
-import faiss
 import numpy as np
 from typing import Tuple, List, Dict, Any
 
@@ -15,8 +14,21 @@ import streamlit as st
 from openai import OpenAI
 
 from config.constants import FACTORS
+from core.resource_manager import ResourceManager, DEFAULT_EMBEDDING_DIM
 
 logger = logging.getLogger(__name__)
+
+
+
+def _ensure_2d_float_array(vectors: Any) -> np.ndarray:
+    """把 embedding 结果统一转为二维 float32 numpy。"""
+    arr = np.array(vectors, dtype=np.float32)
+    if arr.size == 0:
+        return np.array([], dtype=np.float32)
+    if arr.ndim == 1:
+        arr = arr.reshape(1, -1)
+    return arr
+
 
 
 def run_scoring(
@@ -32,7 +44,7 @@ def run_scoring(
     c_num: int = 5
 ) -> Tuple[Dict, str, str, str, str]:
     """
-    执行评分逻辑
+    执行评分逻辑。
 
     Args:
         user_input: 用户输入的茶评描述
@@ -55,127 +67,51 @@ def run_scoring(
     sys_prompt = prompt_config.get('system_template', '')
     user_tpl = prompt_config.get('user_template', '')
 
+    query_vec = None
+
     # 1. 从知识库检索相关内容
     kb_context = ""
     kb_history = ""
-    if kb_data and len(kb_data) > 0:
+    if kb_idx is not None and kb_data and len(kb_data) > 0:
         try:
-            query_vec = embedder.encode([user_input])
-            if len(query_vec) > 0:
-                D, I = kb_idx.search(query_vec, min(r_num, len(kb_data)))
-                kb_chunks = [kb_data[i] for i in I[0] if i < len(kb_data)]
+            query_vec = _ensure_2d_float_array(embedder.encode([user_input]))
+            if query_vec.size > 0 and getattr(kb_idx, 'd', query_vec.shape[1]) == query_vec.shape[1]:
+                _, indices = kb_idx.search(query_vec, min(r_num, len(kb_data)))
+                kb_chunks = [kb_data[i] for i in indices[0] if 0 <= int(i) < len(kb_data)]
                 kb_context = "\n\n".join(kb_chunks)
                 kb_history = f"参考了 {len(kb_chunks)} 条知识库内容"
+            elif query_vec.size > 0:
+                logger.warning(
+                    f"知识库索引维度不匹配：索引 {getattr(kb_idx, 'd', 'unknown')}，查询 {query_vec.shape[1]}"
+                )
+                kb_history = "知识库索引维度不匹配，已跳过本次知识检索"
         except Exception as e:
             logger.error(f"知识库检索失败: {e}")
+            kb_history = "知识库检索失败"
 
     # 2. 从进阶判例检索相似案例
     case_context = ""
     case_history = ""
     if supp_data and len(supp_data) > 0:
         try:
-            query_vec = embedder.encode([user_input])
+            if query_vec is None or query_vec.size == 0:
+                query_vec = _ensure_2d_float_array(embedder.encode([user_input]))
 
-            # 确保查询向量是 numpy 数组
-            if not isinstance(query_vec, np.ndarray):
-                query_vec = np.array(query_vec)
+            if query_vec.size > 0:
+                idx_invalid = (
+                    supp_idx is None
+                    or getattr(supp_idx, 'd', DEFAULT_EMBEDDING_DIM) != query_vec.shape[1]
+                    or getattr(supp_idx, 'ntotal', 0) != len(supp_data)
+                )
 
-            # 检查维度是否匹配
-            if len(query_vec.shape) == 1:
-                query_vec = query_vec.reshape(1, -1)
+                if idx_invalid:
+                    logger.warning("进阶判例索引缺失 / 维度不匹配 / 数量不匹配，正在按缓存向量重建...")
+                    supp_idx, supp_data = ResourceManager.sync_supp_cases(supp_data, embedder=embedder)
+                    st.session_state.supp_cases = (supp_idx, supp_data)
+                    logger.info("✅ 进阶判例索引已按缓存向量重建")
 
-            if query_vec.shape[1] != supp_idx.d:
-                logger.warning(f"判例索引维度不匹配：索引 {supp_idx.d}，查询 {query_vec.shape[1]}")
-
-                # 检查是否有缓存的新索引
-                if 'rebuilt_supp_idx' in st.session_state:
-                    logger.info("使用缓存的新索引")
-                    new_idx = st.session_state.rebuilt_supp_idx
-                    D, I = new_idx.search(query_vec, min(c_num, len(supp_data)))
-                    similar_cases = [supp_data[i] for i in I[0] if i < len(supp_data)]
-                    case_context = _format_cases_for_prompt(similar_cases)
-                    case_history = f"参考了 {len(similar_cases)} 条相似判例（使用缓存索引）"
-                else:
-                    logger.info(f"判例数据量：{len(supp_data)} 条，重新编码以匹配维度...")
-
-                # 重新编码所有判例数据
-                start_time = time.time()
-
-                batch_size = 16
-                all_embeddings = []
-                failed_batches = []
-
-                for i in range(0, len(supp_data), batch_size):
-                    batch_texts = [item["text"] for item in supp_data[i:i+batch_size]]
-
-                    max_retries = 3
-                    batch_embeddings = None
-                    for retry in range(max_retries):
-                        try:
-                            batch_embeddings = embedder.encode(batch_texts)
-                            break
-                        except Exception as e:
-                            logger.warning(f"批次 {i//batch_size + 1} 编码失败（重试 {retry+1}/{max_retries}）: {e}")
-                            if retry < max_retries - 1:
-                                time.sleep(2 ** retry)  # 指数退避
-                            else:
-                                failed_batches.append(i//batch_size + 1)
-                                batch_embeddings = np.zeros((len(batch_texts), query_vec.shape[1]))
-
-                    if batch_embeddings is not None:
-                        all_embeddings.append(batch_embeddings)
-
-                    logger.info(f"已编码 {min(i+batch_size, len(supp_data))}/{len(supp_data)} 条...")
-
-                    # 自部署服务不需要太长的间隔
-                    time.sleep(0.05)
-
-                all_embeddings = np.vstack(all_embeddings)
-
-                if not isinstance(all_embeddings, np.ndarray):
-                    all_embeddings = np.array(all_embeddings)
-
-                if len(all_embeddings.shape) == 1:
-                    all_embeddings = all_embeddings.reshape(1, -1)
-
-                if failed_batches:
-                    logger.warning(f"以下批次编码失败，已使用零向量填充: {failed_batches}")
-
-                # 创建新的索引
-                new_idx = faiss.IndexFlatL2(all_embeddings.shape[1])
-                new_idx.add(all_embeddings.astype('float32'))
-
-                encode_time = time.time() - start_time
-                logger.info(f"编码完成，耗时 {encode_time:.2f} 秒")
-
-                # 缓存到 session_state
-                st.session_state.supp_cases = (new_idx, supp_data)
-                st.session_state.rebuilt_supp_idx = new_idx
-                logger.info("✅ 新索引已缓存到 session_state")
-
-                # 持久化到文件
-                try:
-                    from config.settings import PATHS
-                    from core.resource_manager import ResourceManager
-                    ResourceManager.save(
-                        new_idx,
-                        supp_data,
-                        PATHS.supp_case_index,
-                        PATHS.supp_case_data,
-                        is_json=True
-                    )
-                    logger.info("✅ 新索引已保存到文件")
-                except Exception as e:
-                    logger.warning(f"索引保存失败: {e}")
-
-                # 使用新索引进行搜索
-                D, I = new_idx.search(query_vec, min(c_num, len(supp_data)))
-                similar_cases = [supp_data[i] for i in I[0] if i < len(supp_data)]
-                case_context = _format_cases_for_prompt(similar_cases)
-                case_history = f"参考了 {len(similar_cases)} 条相似判例（索引已重建并缓存）"
-            elif len(query_vec) > 0:
-                D, I = supp_idx.search(query_vec, min(c_num, len(supp_data)))
-                similar_cases = [supp_data[i] for i in I[0] if i < len(supp_data)]
+                _, indices = supp_idx.search(query_vec, min(c_num, len(supp_data)))
+                similar_cases = [supp_data[i] for i in indices[0] if 0 <= int(i) < len(supp_data)]
                 case_context = _format_cases_for_prompt(similar_cases)
                 case_history = f"参考了 {len(similar_cases)} 条相似判例"
         except Exception as e:
@@ -199,7 +135,7 @@ def run_scoring(
             st.session_state.last_llm_sys_prompt = sys_prompt
             st.session_state.last_llm_user_prompt = user_prompt
     except Exception:
-        pass  # 如果在非 Streamlit 环境中运行，忽略错误
+        pass
 
     # 5. 调用 LLM（带超时和重试机制）
     max_retries = 2
@@ -237,8 +173,9 @@ def run_scoring(
             continue
 
 
+
 def _format_cases_for_prompt(cases: List[Dict]) -> str:
-    """格式化判例用于提示词"""
+    """格式化判例用于提示词。"""
     if not cases:
         return "暂无相似判例"
 
@@ -252,8 +189,9 @@ def _format_cases_for_prompt(cases: List[Dict]) -> str:
     return "\n\n".join(parts)
 
 
+
 def _format_basic_cases(cases: List[Dict]) -> str:
-    """格式化基础判例"""
+    """格式化基础判例。"""
     if not cases:
         return "暂无基础判例"
 
@@ -265,12 +203,12 @@ def _format_basic_cases(cases: List[Dict]) -> str:
     return "\n\n".join(parts)
 
 
+
 def _parse_llm_response(content: str) -> Dict:
-    """解析 LLM 响应"""
+    """解析 LLM 响应。"""
     try:
         return json.loads(content)
     except Exception:
-        # 尝试提取 JSON 块
         try:
             import re
             match = re.search(r'\{.*\}', content, re.DOTALL)
@@ -279,5 +217,4 @@ def _parse_llm_response(content: str) -> Dict:
         except Exception:
             pass
 
-    # 解析失败
     return None
