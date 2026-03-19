@@ -440,27 +440,6 @@ def _remove_file_from_kb(filename: str) -> Tuple[bool, str]:
     return True, f"已删除 {filename} 对应的 chunks 和索引"
 
 
-
-def _sync_to_github():
-    """触发 GitHub 同步 tea_data（静默执行，失败仅记日志）"""
-    try:
-        from core.github_sync import GithubSync
-        configured, _ = GithubSync.check_config()
-        if not configured:
-            logger.info("GitHub 未配置，跳过同步")
-            return
-
-        success, msg, synced_files = GithubSync.sync_all_data(st.session_state)
-        if success:
-            logger.info(f"GitHub 同步成功，已同步 {len(synced_files)} 个文件")
-            if 'github_status_cache' in st.session_state:
-                st.session_state.github_status_cache['needs_refresh'] = True
-        else:
-            logger.warning(f"GitHub 同步失败: {msg}")
-    except Exception as e:
-        logger.warning(f"GitHub 同步出错: {e}")
-
-
 # ==========================================
 # UI 渲染
 # ==========================================
@@ -515,7 +494,6 @@ def _render_local_file_list():
                             st.error(f"❌ 删除后更新索引失败: {msg}")
                             return
 
-                        _sync_to_github()
                         st.session_state.refresh_local_files = True
                         st.success(f"✅ 已删除 {file_info['name']}，并更新对应 chunks / index")
                         st.rerun()
@@ -572,7 +550,6 @@ def _render_safety_rebuild_section():
         with st.spinner("🔄 正在重新解析文件并重建索引..."):
             ok, result = _rebuild_all_embeddings()
             if ok:
-                _sync_to_github()
                 st.session_state.refresh_local_files = True
                 st.success(f"✅ 安全重建完成，共 {result} 个知识片段")
                 st.rerun()
@@ -603,8 +580,6 @@ def _handle_upload(files):
             if not ok:
                 st.error(f"❌ 更新知识库索引失败: {result}")
                 return
-
-            _sync_to_github()
             st.session_state.refresh_local_files = True
 
         except Exception as e:
