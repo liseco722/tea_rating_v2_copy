@@ -30,11 +30,6 @@ CHUNK_OVERLAP = 50
 def render_tab3():
     """渲染知识库设计 Tab - 增量索引模式"""
     with st.container():
-        st.info(
-            "💡 新增 RAG 文件时只对新增文件做 embedding；删除文件时只删除对应 chunks，并基于缓存向量快速重建 index。"
-        )
-        st.caption("上传文件会同时写入 tea_data/RAG 与 tea_data/RAG_backup。")
-
         st.markdown("##### 📁 本地知识库文件")
         _render_local_file_list()
 
@@ -47,7 +42,6 @@ def render_tab3():
 
         st.markdown("##### 🛡️ 安全冗余重建")
         _render_safety_rebuild_section()
-
 
 # ==========================================
 # 对外暴露：供 sidebar 调用的统一重建入口
