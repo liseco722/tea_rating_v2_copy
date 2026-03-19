@@ -130,22 +130,9 @@ def _display_data_statistics():
     </div>
     """, unsafe_allow_html=True)
 
-
-def _get_template_path():
-    """获取模板文件路径（兼容本地开发和 Streamlit Cloud）"""
-    candidates = [
-        Path(__file__).parent.parent / "tea_backup" / "template.xlsx",
-        Path("tea_backup") / "template.xlsx",
-        Path(__file__).parent / "tea_backup" / "template.xlsx",
-    ]
-    for p in candidates:
-        if p.exists():
-            return p
-    return None
-
-
 def _render_manual_data_section():
     """渲染手动准备数据区域 - 升级版"""
+    from config.settings import PATHS
     st.markdown("""
     <div style="padding: 12px; background: #F5F9F5; border-radius: 8px; margin-bottom: 10px; border-left: 4px solid #4A5D53;">
         <div style="color: #4A5D53; font-weight: 600; margin-bottom: 4px;">📄 手动准备数据</div>
@@ -162,7 +149,7 @@ def _render_manual_data_section():
     )
 
     # 下载模板按钮 - 使用相对路径
-    template_path = _get_template_path()
+    template_path = PATHS.template_file
     if template_path:
         with open(template_path, 'rb') as f:
             template_data = f.read()
