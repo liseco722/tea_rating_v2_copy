@@ -4,18 +4,18 @@ sidebar.py
 侧边栏 UI 组件 - 控制台风格
 """
 
-import os
-import time
 import logging
-import streamlit as st
+from pathlib import Path
+
 import requests
+import streamlit as st
 from openai import OpenAI
 
 from config.settings import PATHS
-from config.constants import TEA_EXAMPLES
 from core.resource_manager import ResourceManager
 
 logger = logging.getLogger(__name__)
+
 
 
 def render_sidebar():
@@ -81,7 +81,7 @@ def render_sidebar():
             )
         client_d = st.session_state.client_d
 
-        # RAG 延迟加载
+        # RAG 缓存与延迟加载（优化版）
         _handle_rag_loading()
 
         st.markdown("<div style='height: 1px; background: #E8E8E8; margin: 1rem 0;'></div>", unsafe_allow_html=True)
@@ -89,9 +89,9 @@ def render_sidebar():
         # 数据概览
         st.markdown("**数据概览**")
 
-        kb_count = len(st.session_state.kb[1])
-        basic_count = len(st.session_state.basic_cases)
-        supp_count = len(st.session_state.supp_cases[1])
+        kb_count = len(st.session_state.get('kb', (None, []))[1])
+        basic_count = len(st.session_state.get('basic_cases', []))
+        supp_count = len(st.session_state.get('supp_cases', (None, []))[1])
 
         st.markdown(f"<div style='font-size: 0.85rem; color: #666; margin-top: 0.5rem;'>知识库：{kb_count}</div>", unsafe_allow_html=True)
         st.markdown(f"<div style='font-size: 0.85rem; color: #666; margin-top: 0.25rem;'>基础判例：{basic_count}</div>", unsafe_allow_html=True)
@@ -108,96 +108,109 @@ def render_sidebar():
     return embedder, client, client_d, model_id
 
 
-def _handle_rag_loading():
-    """处理 RAG 延迟加载逻辑 - 查询缓存"""
-    from config.settings import PATHS
 
-    kb_has_data = st.session_state.kb[1] is not None and len(st.session_state.kb[1]) > 0
-    loading_status = st.session_state.get('rag_loading_status', 'pending')
-    rag_loading_needed = st.session_state.get('rag_loading_needed', False)
+def _list_local_rag_files():
+    if not PATHS.RAG_DIR.exists():
+        return []
+    return [
+        f for f in PATHS.RAG_DIR.iterdir()
+        if f.is_file() and f.suffix.lower() in {'.txt', '.pdf', '.docx'}
+    ]
 
+
+
+def _load_kb_from_cache() -> bool:
+    """仅从本地缓存加载 KB，不触发 embedding。"""
     try:
-        local_files = list(PATHS.RAG_DIR.glob("*.txt")) + \
-                     list(PATHS.RAG_DIR.glob("*.pdf")) + \
-                     list(PATHS.RAG_DIR.glob("*.docx"))
-        local_file_count = len(local_files) if PATHS.RAG_DIR.exists() else 0
+        kb_idx, kb_chunks = ResourceManager.load(PATHS.kb_index, PATHS.kb_chunks)
+        st.session_state.kb = (kb_idx, kb_chunks)
+        st.session_state.kb_files = list(ResourceManager.load_kb_metadata().get("files", {}).keys())
+        st.session_state.rag_loading_status = 'complete'
+        st.session_state.rag_loading_needed = False
+        return True
     except Exception as e:
-        logger.warning(f"获取本地 RAG 文件列表失败: {e}")
-        local_file_count = 0
+        logger.warning(f"从缓存加载知识库失败: {e}")
+        st.session_state.rag_loading_status = 'failed'
+        return False
 
-    local_index_exists = PATHS.kb_index.exists()
 
-    # 情况1：加载失败
-    if loading_status == 'failed':
-        st.warning("⚠️ 知识库加载失败")
-        if st.button("🔄 重试加载", type="secondary", width='stretch'):
-            st.session_state.rag_loading_status = 'pending'
-            st.session_state.rag_loading_needed = True
-            st.rerun()
-        return
 
-    # 情况2：正在加载中
-    if loading_status == 'loading':
-        st.info("🔄 正在加载知识库，请稍候...")
-        return
+def _rebuild_kb_via_tab3() -> bool:
+    """调用 Tab3 的统一安全重建逻辑。"""
+    try:
+        from ui.tab3_knowledge import rebuild_rag_cache
+        ok, _ = rebuild_rag_cache()
+        return ok
+    except Exception as e:
+        logger.error(f"安全重建知识库失败: {e}", exc_info=True)
+        return False
 
-    # 情况3：知识库有数据
-    if kb_has_data:
-        st.success("✅ 知识库加载成功")
-        kb_count = len(st.session_state.kb[1])
-        st.caption(f"📊 已加载 {kb_count} 个知识片段")
-        st.caption(f"📁 本地 {local_file_count} 个文件")
 
-    # 情况4：知识库为空，需要加载
-    if rag_loading_needed and loading_status == 'pending':
-        with st.status("🔄 正在加载知识库...", expanded=True) as status:
-            st.write("📂 读取本地 RAG 文件...")
-            st.session_state.rag_loading_status = 'loading'
 
-            try:
-                from core import load_rag_from_local
-                embedder = st.session_state.get('embedder')
-                success, msg = load_rag_from_local(embedder)
+def _handle_rag_loading():
+    """处理 RAG 延迟加载逻辑 - 优化版。
 
-                if success:
-                    status.update(label="✅ 知识库加载完成", state="complete", expanded=False)
-                    st.session_state.rag_loading_status = 'complete'
-                    # 性能优化：移除了 time.sleep(1)
-                    st.rerun()
-                else:
-                    status.update(label="❌ 知识库加载失败", state="error", expanded=True)
-                    st.error(msg)
-                    st.info("💡 您可以在「知识库设计」手动上传 RAG 文件")
-                    st.session_state.rag_loading_status = 'failed'
+    新逻辑：
+    1. 优先只加载本地缓存 index/chunks，不自动触发 embedding。
+    2. 检测 tea_data/RAG 与缓存元数据是否一致。
+    3. 只有用户主动点击时，才做安全重建。
+    """
+    kb_state = st.session_state.get('kb', (None, []))
+    kb_data = kb_state[1] if isinstance(kb_state, tuple) and len(kb_state) > 1 else []
+    local_files = _list_local_rag_files()
+    local_names = {f.name for f in local_files}
 
-                    if st.button("🔄 重试加载", type="secondary"):
-                        st.session_state.rag_loading_status = 'pending'
+    metadata = ResourceManager.load_kb_metadata()
+    cached_names = set(metadata.get("files", {}).keys())
+    cache_complete = all([
+        PATHS.kb_index.exists(),
+        PATHS.kb_chunks.exists(),
+        hasattr(PATHS, 'kb_vectors') and PATHS.kb_vectors.exists(),
+        PATHS.kb_metadata.exists(),
+    ])
+    cache_mismatch = local_names != cached_names if local_names or cached_names else False
+
+    # 情况 1：Session 内已经有知识库
+    if kb_data:
+        st.success("✅ 知识库已就绪")
+        st.caption(f"📊 已加载 {len(kb_data)} 个知识片段")
+        st.caption(f"📁 本地 {len(local_files)} 个文件")
+
+        if cache_mismatch:
+            st.warning("⚠️ 检测到 tea_data/RAG 与缓存索引不一致")
+            if st.button("🛡️ 安全重建知识库", type="secondary", width='stretch'):
+                with st.spinner("🔄 正在重建知识库索引..."):
+                    if _rebuild_kb_via_tab3():
                         st.rerun()
-
-            except Exception as e:
-                status.update(label="❌ 加载出错", state="error", expanded=True)
-                st.error(f"加载失败: {str(e)}")
-                logger.error(f"RAG 加载失败: {e}", exc_info=True)
-                st.session_state.rag_loading_status = 'failed'
-
-                if st.button("🔄 重试加载", type="secondary"):
-                    st.session_state.rag_loading_status = 'pending'
-                    st.rerun()
+                    st.error("❌ 重建失败，请检查日志")
         return
 
-    # 情况5：知识库为空且不需要加载
-    if not kb_has_data and not rag_loading_needed:
-        if local_file_count > 0 and not local_index_exists:
-            st.info(f"📂 发现本地有 {local_file_count} 个文件")
-            if st.button("📥 加载知识库", type="primary", width='stretch'):
-                st.session_state.rag_loading_needed = True
-                st.session_state.rag_loading_status = 'pending'
+    # 情况 2：没有任何本地文件
+    if not local_files:
+        st.info("💡 请在「知识库设计」上传文件")
+        st.session_state.rag_loading_status = 'empty'
+        st.session_state.rag_loading_needed = False
+        return
+
+    # 情况 3：有完整缓存且文件集一致 -> 直接从缓存加载
+    if cache_complete and not cache_mismatch:
+        if _load_kb_from_cache():
+            kb_count = len(st.session_state.get('kb', (None, []))[1])
+            st.success("✅ 已从本地缓存载入知识库")
+            st.caption(f"📊 已载入 {kb_count} 个知识片段 / {len(local_files)} 个文件")
+        else:
+            st.warning("⚠️ 本地缓存存在，但加载失败")
+        return
+
+    # 情况 4：有本地文件，但缓存缺失或不一致 -> 等用户主动修复
+    if cache_mismatch:
+        st.warning("⚠️ 检测到 tea_data/RAG 与网页缓存不一致")
+        st.caption("建议点击下方按钮重新解析文件、更新 chunks 和 index。")
+    else:
+        st.info(f"📂 发现本地有 {len(local_files)} 个文件，但缓存索引尚未建立")
+
+    if st.button("🛡️ 构建 / 修复知识库索引", type="primary", width='stretch'):
+        with st.spinner("🔄 正在构建知识库索引..."):
+            if _rebuild_kb_via_tab3():
                 st.rerun()
-            return
-
-        if local_file_count == 0:
-            st.info("💡 请在「知识库设计」上传文件")
-            return
-
-        st.info("💡 请在「知识库设计」添加文件或点击加载")
-
+            st.error("❌ 构建失败，请检查日志")
