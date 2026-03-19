@@ -133,6 +133,7 @@ def _display_data_statistics():
 def _render_manual_data_section():
     """渲染手动准备数据区域 - 升级版"""
     from config.settings import PATHS
+    from data.finetune_processor import finetune_data_process
     st.markdown("""
     <div style="padding: 12px; background: #F5F9F5; border-radius: 8px; margin-bottom: 10px; border-left: 4px solid #4A5D53;">
         <div style="color: #4A5D53; font-weight: 600; margin-bottom: 4px;">📄 手动准备数据</div>
@@ -169,7 +170,21 @@ def _render_manual_data_section():
         st.success(f"✅ 已选择：{ft_file.name}")
 
         if st.button("📤 导入微调数据", type="primary", key="ft_import", width='stretch'):
-            st.info("⚠️ 导入功能待完整实现")
+            with st.spinner("正在处理文件..."):
+                new_entries = finetune_data_process(ft_file)
+            if new_entries:
+                # new_entries 应为可直接写入 JSONL 的 dict 列表
+                try:
+                    with open(PATHS.training_file, "a", encoding="utf-8") as f:
+                        for entry in new_entries:
+                            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                    st.success(f"✅ 成功导入 {len(new_entries)} 条微调数据！")
+                    time.sleep(1)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"写入失败: {e}")
+            else:
+                st.error("未能从文件中解析到有效数据，请检查文件格式。")
 
 
 def _render_auto_fill_section():
@@ -184,10 +199,27 @@ def _render_auto_fill_section():
     st.caption("💡 自动跳过重复数据")
 
     if st.button("➕ 基础判例 → 微调数据", width='stretch', key="ft_add_basic"):
-        st.info("⚠️ 功能待完整实现")
+        if not st.session_state.basic_cases:
+            st.warning("基础判例库为空")
+        else:
+            added, skipped = ResourceManager.append_cases_to_finetune(
+                st.session_state.basic_cases, sys_tpl, user_tpl
+            )
+            st.success(f"新增 {added} 条，跳过 {skipped} 条重复数据")
+            time.sleep(1)
+            st.rerun()
 
     if st.button("➕ 进阶判例 → 微调数据", width='stretch', key="ft_add_supp"):
-        st.info("⚠️ 功能待完整实现")
+        _, supp_data = st.session_state.supp_cases
+        if not supp_data:
+            st.warning("进阶判例库为空")
+        else:
+            added, skipped = ResourceManager.append_cases_to_finetune(
+                supp_data, sys_tpl, user_tpl
+            )
+            st.success(f"新增 {added} 条，跳过 {skipped} 条重复数据")
+            time.sleep(1)
+            st.rerun()
 
 
 def _render_training_section(manager_url: str, server_status: str):
@@ -239,4 +271,19 @@ def _render_training_section(manager_url: str, server_status: str):
     """, unsafe_allow_html=True)
 
     if st.button("🔥 开始微调", type="primary", disabled=btn_disabled, width='stretch', key="start_ft"):
-        st.info("⚠️ 训练功能待完整实现")
+        if not PATHS.training_file.exists():
+            st.error("找不到训练数据文件！")
+        else:
+            try:
+                with open(PATHS.training_file, "rb") as f:
+                    with st.spinner("正在上传数据并启动训练任务..."):
+                        files = {'file': ('tea_feedback.jsonl', f, 'application/json')}
+                        r = requests.post(f"{MANAGER_URL}/upload_and_train", files=files, timeout=100)
+                    if r.status_code == 200:
+                        st.balloons()
+                        st.success(f"✅ 任务已提交！服务器响应: {r.json().get('message')}")
+                        st.info("💡 稍后刷新页面查看状态，训练完成后服务会自动恢复。")
+                    else:
+                        st.error(f"❌ 提交失败: {r.text}")
+            except Exception as e:
+                st.error(f"❌ 连接错误: {e}")
