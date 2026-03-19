@@ -249,31 +249,31 @@ def _render_batch_add_section(case_type: str):
 
         if st.button("📤 导入判例", key=f"{case_type}_batch_import", type="primary", width='stretch'):
             with st.spinner("正在处理文件..."):
-            new_entries = basic_case_process(bc_file)
+                new_entries = basic_case_process(bc_file)
     
-        if new_entries:
-            try:
-                if case_type == "basic":
-                    clean_entries = [ResourceManager.strip_case_vector(x) for x in new_entries]
-                    st.session_state.basic_cases.extend(clean_entries)
-                    ResourceManager.save_json(st.session_state.basic_cases, PATHS.basic_case_data)
-                    _sync_basic_to_github()
-                    st.success(f"✅ 成功导入 {len(new_entries)} 条基础判例！")
-                else:
-                    _, supp_data = st.session_state.supp_cases
-                    for entry in new_entries:
-                        ResourceManager.ensure_case_embedding(entry, embedder)
-                        supp_data.append(entry)
-                    new_idx, supp_data = ResourceManager.sync_supp_cases(supp_data, embedder=embedder)
-                    st.session_state.supp_cases = (new_idx, supp_data)
-                    _sync_supp_to_github(supp_data)
-                    st.success(f"✅ 成功导入 {len(new_entries)} 条进阶判例！")
-    
-                time.sleep(1)
-                st.rerun()
-    
-            except Exception as e:
-                st.error(f"写入失败: {e}")
+            if new_entries:
+                try:
+                    if case_type == "basic":
+                        clean_entries = [ResourceManager.strip_case_vector(x) for x in new_entries]
+                        st.session_state.basic_cases.extend(clean_entries)
+                        ResourceManager.save_json(st.session_state.basic_cases, PATHS.basic_case_data)
+                        _sync_basic_to_github()
+                        st.success(f"✅ 成功导入 {len(new_entries)} 条基础判例！")
+                    else:
+                        _, supp_data = st.session_state.supp_cases
+                        for entry in new_entries:
+                            ResourceManager.ensure_case_embedding(entry, embedder)
+                            supp_data.append(entry)
+                        new_idx, supp_data = ResourceManager.sync_supp_cases(supp_data, embedder=embedder)
+                        st.session_state.supp_cases = (new_idx, supp_data)
+                        _sync_supp_to_github(supp_data)
+                        st.success(f"✅ 成功导入 {len(new_entries)} 条进阶判例！")
+        
+                    time.sleep(1)
+                    st.rerun()
+        
+                except Exception as e:
+                    st.error(f"写入失败: {e}")
 
 def _save_case(text, scores, master_comment, case_type, embedder):
     """保存判例 - 增量向量版。"""
