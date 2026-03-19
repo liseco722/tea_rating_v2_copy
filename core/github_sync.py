@@ -162,7 +162,7 @@ class GithubSync:
 
     # ---------- RAG 文件管理 ----------
     @staticmethod
-    def backup_rag_file(file_content: bytes, filename: str, backup_folder: str = "tea_backup") -> bool:
+    def backup_rag_file(file_content: bytes, filename: str, backup_folder: str = "tea_data/RAG") -> bool:
         """
         备份 RAG 文件到 GitHub
 
