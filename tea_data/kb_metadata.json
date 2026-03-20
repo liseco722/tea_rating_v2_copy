@@ -1,14 +1,33 @@
 {
-  "2018-0322-中国茶感官品鉴手册-终稿.pdf": {
-    "chunk_start": 0,
-    "chunk_count": 55
+  "version": 2,
+  "chunk_size": 500,
+  "overlap": 50,
+  "vector_dim": 768,
+  "files": {
+    "2018-0322-中国茶感官品鉴手册-终稿.pdf": {
+      "start": 0,
+      "end": 55,
+      "chunk_count": 55,
+      "size": 4346849
+    },
+    "GBT21733-2008茶饮料.pdf": {
+      "start": 55,
+      "end": 55,
+      "chunk_count": 0,
+      "size": 2205399
+    },
+    "茶叶感官评审术语_GBT+14487-2017.pdf": {
+      "start": 55,
+      "end": 275,
+      "chunk_count": 220,
+      "size": 2584818
+    },
+    "茶叶测评与鉴定手册16.5x24CM-ol.pdf": {
+      "start": 275,
+      "end": 275,
+      "chunk_count": 0,
+      "size": 13838958
+    }
   },
-  "GBT+23776-2018茶叶感官审评方法.pdf": {
-    "chunk_start": 55,
-    "chunk_count": 102
-  },
-  "茶叶感官评审术语_GBT+14487-2017.pdf": {
-    "chunk_start": 157,
-    "chunk_count": 220
-  }
+  "updated_at": "2026-03-20 05:37:41"
 }
