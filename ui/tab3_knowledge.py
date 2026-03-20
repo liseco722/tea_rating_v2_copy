@@ -334,7 +334,11 @@ def _push_local_file_to_github(local_path: Path, commit_msg: str = None):
 
 
 def _save_kb_state(chunks: List[str], vectors: List[List[float]], metadata: Dict):
-    """保存 KB 缓存并刷新 session_state，同时同步 index 到 GitHub。"""
+    """保存 KB 缓存并刷新 session_state，同时同步到 GitHub。
+
+    写入后会立即回读 metadata 做校验，确保磁盘落盘成功。
+    """
+    # ---- 1. 写入本地磁盘 ----
     ResourceManager.save_kb_metadata(metadata)
     ResourceManager.save_kb_vectors(vectors)
     ResourceManager.save_kb_files(list(metadata.get('files', {}).keys()))
@@ -342,13 +346,34 @@ def _save_kb_state(chunks: List[str], vectors: List[List[float]], metadata: Dict
     index = ResourceManager.build_index_from_vectors(vectors, DEFAULT_EMBEDDING_DIM)
     ResourceManager.save(index, chunks, PATHS.kb_index, PATHS.kb_chunks)
 
+    # ---- 2. 写入验证：回读 metadata 确认落盘成功 ----
+    saved_names = set(metadata.get('files', {}).keys())
+    verify_meta = ResourceManager.load_kb_metadata()
+    verify_names = set(verify_meta.get('files', {}).keys())
+    if saved_names != verify_names:
+        logger.error(
+            "metadata 写入验证失败！期望: %s, 实际回读: %s, metadata 路径: %s",
+            saved_names, verify_names, PATHS.kb_metadata
+        )
+        # 重试一次
+        ResourceManager.save_kb_metadata(metadata)
+        verify_meta2 = ResourceManager.load_kb_metadata()
+        verify_names2 = set(verify_meta2.get('files', {}).keys())
+        if saved_names == verify_names2:
+            logger.info("metadata 重试写入成功")
+        else:
+            logger.error("metadata 重试仍然失败，磁盘可能存在问题")
+    else:
+        logger.info("metadata 写入验证通过，共 %d 个文件记录", len(saved_names))
+
+    # ---- 3. 刷新 session_state ----
     st.session_state.kb = (index, chunks)
     st.session_state.kb_files = list(metadata.get('files', {}).keys())
     st.session_state.rag_loading_status = 'complete'
     st.session_state.rag_loading_needed = False
 
-    # 同步关键文件到 GitHub tea_data/
-    for path in [PATHS.kb_index, PATHS.kb_chunks, PATHS.kb_metadata, PATHS.kb_files]:
+    # ---- 4. 同步所有缓存文件到 GitHub（含向量缓存） ----
+    for path in [PATHS.kb_index, PATHS.kb_chunks, PATHS.kb_metadata, PATHS.kb_files, PATHS.kb_vectors]:
         _push_local_file_to_github(path, f"Update KB: {path.name}")
 
 
@@ -573,7 +598,10 @@ def _render_upload_section():
 
 
 def _render_safety_rebuild_section():
-    """渲染安全重建区域。"""
+    """渲染安全重建区域。
+
+    始终从磁盘读取 metadata 做一致性检查，确保磁盘是唯一的真实来源。
+    """
     metadata = ResourceManager.load_kb_metadata()
     local_files = _get_local_files()
     local_names = {item['name'] for item in local_files}
@@ -581,7 +609,25 @@ def _render_safety_rebuild_section():
     mismatch = local_names != cached_names
 
     if mismatch:
-        st.warning("⚠️ 检测到 tea_data/RAG 与当前网页缓存不一致。")
+        only_in_local = local_names - cached_names
+        only_in_cache = cached_names - local_names
+        detail_parts = []
+        if only_in_local:
+            detail_parts.append(f"RAG 目录有但缓存中无：{', '.join(sorted(only_in_local))}")
+        if only_in_cache:
+            detail_parts.append(f"缓存中有但 RAG 目录无：{', '.join(sorted(only_in_cache))}")
+        if not only_in_local and not only_in_cache:
+            # 理论上不会走到这里（集合不等但对称差为空），作为兜底
+            detail_parts.append("文件名集合比较异常，请检查日志")
+
+        logger.warning(
+            "KB 一致性检查不通过 — 本地: %s, 缓存: %s, metadata 路径: %s",
+            local_names, cached_names, PATHS.kb_metadata
+        )
+
+        st.warning("⚠️ 检测到 tea_data/RAG 与磁盘缓存不一致。")
+        for part in detail_parts:
+            st.caption(f"  · {part}")
         st.caption("点击下方按钮可重新解析全部文件、重新 embedding，并重建 chunks / index。")
     else:
         st.info("当前缓存与 tea_data/RAG 文件列表一致。若怀疑缓存损坏，仍可手动执行安全重建。")
