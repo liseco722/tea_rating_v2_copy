@@ -36,6 +36,7 @@ from config.constants import DEFAULT_USER_TEMPLATE
 # 核心模块
 from core.resource_manager import ResourceManager, DEFAULT_EMBEDDING_DIM
 from core import bootstrap_cases
+from core.github_sync import GithubSync
 
 # UI 模块
 from ui.sidebar import render_sidebar
@@ -127,6 +128,31 @@ def _ensure_supp_case_index(embedder):
         len(synced_cases),
         getattr(new_idx, 'd', DEFAULT_EMBEDDING_DIM)
     )
+
+    # ---- 将重建后的索引文件和判例数据同步到 GitHub ----
+    try:
+        # 同步 index 二进制文件
+        if PATHS.supp_case_index.exists():
+            index_bytes = PATHS.supp_case_index.read_bytes()
+            ok_idx = GithubSync.push_binary_file(
+                "tea_data/supp_cases.index",
+                index_bytes,
+                "Sync rebuilt supp_cases.index from App"
+            )
+            if ok_idx:
+                logger.info("✅ 进阶判例索引已同步到 GitHub")
+            else:
+                logger.warning("⚠️ 进阶判例索引同步到 GitHub 失败")
+
+        # 同步更新后的判例 JSON（可能包含新缓存的 _embedding）
+        ok_json = GithubSync.sync_supp_cases(synced_cases)
+        if ok_json:
+            logger.info("✅ 进阶判例数据已同步到 GitHub")
+        else:
+            logger.warning("⚠️ 进阶判例数据同步到 GitHub 失败")
+    except Exception as e:
+        logger.warning(f"⚠️ GitHub 同步失败（不影响本地使用）: {e}")
+
     return True
 
 
