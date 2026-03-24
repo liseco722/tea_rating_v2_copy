@@ -11,6 +11,7 @@ import logging
 from pathlib import Path
 from typing import Any, List, Dict, Tuple, Optional
 
+
 import numpy as np
 import streamlit as st
 import faiss
@@ -271,21 +272,39 @@ class ResourceManager:
                 logger.warning(f"读取微调数据失败: {e}")
         return existing
 
+
+    
     @staticmethod
     def append_cases_to_finetune(cases: List[Dict], sys_prompt: str, user_tpl: str) -> Tuple[int, int]:
         """
-        将判例追加到微调数据文件（自动去重）。
-
+        将判例追加到微调数据文件（Alpaca 格式，自动去重）。
+    
         Args:
             cases: 判例列表
             sys_prompt: 系统提示词
             user_tpl: 用户提示词模板
-
+    
         Returns:
             Tuple[int, int]: (新增条数, 跳过的重复条数)
         """
         existing_texts = ResourceManager._read_existing_finetune_texts()
         added, skipped = 0, 0
+    
+        def build_output(c: Dict) -> str:
+            scores = c.get("scores", {})
+            outputs = []
+    
+            for k, v in scores.items():
+                score = v.get("score")
+                comment = v.get("comment", "")
+    
+                if score is None:
+                    continue
+    
+                line = f"{k}{score}分，依据是{comment}"
+                outputs.append(line)
+            return "。".join(outputs)
+    
         try:
             ResourceManager._ensure_parent_dir(PATHS.training_file)
             with open(PATHS.training_file, "a", encoding="utf-8") as f:
@@ -294,31 +313,31 @@ class ResourceManager:
                     if case_text in existing_texts:
                         skipped += 1
                         continue
-                    scores = c.get("scores", {})
-                    master_comment = c.get("master_comment", "（人工校准）")
-                    user_content = (user_tpl
-                                    .replace("{product_desc}", case_text)
-                                    .replace("{context_text}", "")
-                                    .replace("{basic_case_text}", "")
-                                    .replace("{case_text}", ""))
-                    assistant_content = json.dumps(
-                        {"master_comment": master_comment, "scores": scores},
-                        ensure_ascii=False
+    
+                    user_content = (
+                        user_tpl
+                        .replace("{product_desc}", case_text)
+                        .replace("{context_text}", "")
+                        .replace("{basic_case_text}", "")
+                        .replace("{case_text}", "")
                     )
+    
                     entry = {
-                        "messages": [
-                            {"role": "system", "content": sys_prompt},
-                            {"role": "user", "content": user_content},
-                            {"role": "assistant", "content": assistant_content}
-                        ]
+                        "instruction": sys_prompt,
+                        "input": user_content,
+                        "output": build_output(c)
                     }
+    
                     f.write(json.dumps(entry, ensure_ascii=False) + "\n")
                     existing_texts.add(case_text)
                     added += 1
+    
             return added, skipped
+    
         except Exception as e:
             logger.error(f"微调数据追加失败: {e}")
             return 0, 0
+
 
     @staticmethod
     def save_ft_status(job_id, status, fine_tuned_model=None):
