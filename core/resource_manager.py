@@ -299,10 +299,12 @@ class ResourceManager:
                 comment = v.get("comment", "")
     
                 if score is None:
-                    continue
-    
-                line = f"{k}{score}分，依据是{comment}"
-                outputs.append(line)
+                    line = f"关于{k}相关的内容有：{comment}"
+                    outputs.append(line)
+                else:
+                    line = f"{k}{score}分，依据是{comment}"
+                    outputs.append(line)
+                    
             return "。".join(outputs)
     
         try:
