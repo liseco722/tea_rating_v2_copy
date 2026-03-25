@@ -28,11 +28,12 @@ def _build_output_text(scores: Dict) -> str:
         score = v.get("score")
         comment = v.get("comment", "")
 
-        if score is None:
-            continue
-
-        line = f"{k}{score}分，依据是{comment}"
-        outputs.append(line)
+            if score is None:
+                line = f"关于{k}相关的内容有：{comment}"
+                outputs.append(line)
+            else:
+                line = f"{k}{score}分，依据是{comment}"
+                outputs.append(line)
 
     return "。".join(outputs)
 
