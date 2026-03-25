@@ -150,9 +150,10 @@ def run_scoring(
                     {"role": "system", "content": sys_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.1,
+                temperature=0.3,
                 max_tokens=2000,
-                timeout=timeout
+                timeout=timeout,
+                response_format={"type": "json_object"}
             )
 
             content = response.choices[0].message.content
