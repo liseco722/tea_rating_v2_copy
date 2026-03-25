@@ -150,7 +150,7 @@ def run_scoring(
                     {"role": "system", "content": sys_prompt},
                     {"role": "user", "content": user_prompt}
                 ],
-                temperature=0.2,
+                temperature=0.1,
                 max_tokens=2000,
                 timeout=timeout
             )
