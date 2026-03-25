@@ -156,9 +156,21 @@ def run_scoring(
             )
 
             content = response.choices[0].message.content
-            scores = _parse_llm_response(content)
 
+            try:
+                st.session_state.last_llm_raw_output = content
+            except Exception:
+                pass
+            
+            logger.warning(f"[LLM RAW OUTPUT] {repr(content)}")
+            
+            scores = _parse_llm_response(content)
+            
+            if scores is None:
+                logger.error(f"[LLM PARSE FAILED] raw={repr(content)}")
+            
             return scores, kb_history, case_history, sys_prompt, user_prompt
+
 
         except Exception as e:
             error_msg = str(e)
