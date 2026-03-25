@@ -60,18 +60,7 @@ def _build_alpaca_entry(case_data: Dict, sys_prompt: str, user_tpl: str) -> Dict
     text = case_data.get("text", "").strip()
     scores = case_data.get("scores", {})
 
-    user_content = (
-        user_tpl
-        .replace("{product_desc}", text)
-        .replace("{context_text}", "")
-        .replace("{basic_case_text}", "")
-        .replace("{case_text}", "")
-    ).strip()
-
-    # 如果 user_tpl 为空，就直接用原文本作为 input
-    if not user_content:
-        user_content = text
-
+    user_content = text
     output_text = _build_output_text(scores)
 
     return {
