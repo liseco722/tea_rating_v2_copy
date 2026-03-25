@@ -316,13 +316,7 @@ class ResourceManager:
                         skipped += 1
                         continue
     
-                    user_content = (
-                        user_tpl
-                        .replace("{product_desc}", case_text)
-                        .replace("{context_text}", "")
-                        .replace("{basic_case_text}", "")
-                        .replace("{case_text}", "")
-                    )
+                    user_content = case_text
     
                     entry = {
                         "instruction": sys_prompt,
