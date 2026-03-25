@@ -5,6 +5,7 @@ scoring.py
 """
 
 import json
+import re
 import time
 import logging
 import numpy as np
@@ -208,15 +209,38 @@ def _format_basic_cases(cases: List[Dict]) -> str:
 
 def _parse_llm_response(content: str) -> Dict:
     """解析 LLM 响应。"""
-    try:
-        return json.loads(content)
-    except Exception:
+    if content is None:
+        return None
+
+    if not isinstance(content, str):
         try:
-            import re
-            match = re.search(r'\{.*\}', content, re.DOTALL)
-            if match:
-                return json.loads(match.group())
+            content = str(content)
         except Exception:
-            pass
+            return None
+
+    text = content.strip()
+
+    # 去掉 markdown 代码块
+    text = re.sub(r"^```json\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^```\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
+
+    # 去掉 think 标签
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+
+    # 先尝试整体解析
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+
+    # 再尝试抽取最外层 JSON
+    try:
+        match = re.search(r"\{[\s\S]*\}", text)
+        if match:
+            return json.loads(match.group(0))
+    except Exception:
+        pass
 
     return None
+
